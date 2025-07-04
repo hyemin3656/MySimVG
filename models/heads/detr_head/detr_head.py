@@ -64,7 +64,7 @@ class DETRHead(nn.Module):
         )
         self.language_guided_query_selection_flag = language_guided_query_selection_flag
         if self.language_guided_query_selection_flag:
-            self.dummy_token = nn.Parameter(torch.randn(1, 1, in_channels)) #차원 수정 필요
+            self.dummy_token = nn.Parameter(torch.randn(num_queries, in_channels)) 
             self.query_proj = nn.Linear(in_channels, embed_dim)
 
         # define classification head and box head
@@ -144,19 +144,19 @@ class DETRHead(nn.Module):
     def language_guided_query_selection(self, text_feat, img_feat, text_scores, text_mask, epoch=None):
         #text_scores : (bs, max_seq_len)
         nan_mask = text_mask.bool().unsqueeze(1) #(bs, 1, max_seq_len)
-        dummy_token_expanded = self.dummy_token.expand(img_feat.size(0), -1, -1)
+        dummy_token_expanded = self.dummy_token.unsqueeze(0).expand(img_feat.size(0), -1, -1)
         # if epoch>=10:
-        #     img_feat_with_dummy = torch.cat([img_feat, dummy_token_expanded], dim=1) #(bs, num_patches+1, embed_dim)
+        #     img_feat_with_dummy = torch.cat([img_feat, dummy_token_expanded], dim=1) #(bs, num_patches + num_query, embed_dim)
         # else:
         #     img_feat_with_dummy = img_feat
 
-        img_feat_with_dummy = torch.cat([img_feat, dummy_token_expanded], dim=1) #(bs, num_patches+1, embed_dim)
+        img_feat_with_dummy = torch.cat([img_feat, dummy_token_expanded], dim=1) #(bs, num_patches + num_query, embed_dim)
         # --- reshape for broadcasting ---
-        img_feat_exp = img_feat_with_dummy.unsqueeze(2)  # (bs, N_p+1, 1, dim)
+        img_feat_exp = img_feat_with_dummy.unsqueeze(2)  # (bs, N_p + num_query, 1, dim)
         text_feat_exp = text_feat.unsqueeze(1)           # (bs, 1, max_seq_len, dim)
     
         # --- cosine similarity 계산 ---
-        similarity_cos = F.cosine_similarity(img_feat_exp, text_feat_exp, dim=-1)  # (bs, N_p+1, max_seq_len)
+        similarity_cos = F.cosine_similarity(img_feat_exp, text_feat_exp, dim=-1)  # (bs, N_p + num_query, max_seq_len)
         #--- cosine similarity + scaling ---
         similarity_norm = (similarity_cos + 1) / 2 
         #text feature와 image feature 내적
@@ -185,9 +185,9 @@ class DETRHead(nn.Module):
 
         text_scores_expan_no_dum = text_scores.unsqueeze(1).expand(-1, img_feat.size(1), -1)
         not_dummy_scale_factor = not_dummy_func(text_scores_expan_no_dum)
-        text_scores_expan_dum = text_scores.unsqueeze(1).expand(-1, 1, -1)
+        text_scores_expan_dum = text_scores.unsqueeze(1).expand(-1, self.num_queries, -1)
         dummy_scale_factor = dummy_func(text_scores_expan_dum)
-        scale_factor = torch.cat([not_dummy_scale_factor, dummy_scale_factor], dim=1) #(bs, N_p+1, max_seq_len)
+        scale_factor = torch.cat([not_dummy_scale_factor, dummy_scale_factor], dim=1) #(bs, N_p + num_queries, max_seq_len)
         scaled_similarity = scale_factor * similarity_norm
 
         # not_dummy_scale_factor = text_scores.unsqueeze(1).expand(-1, img_feat.size(1), -1)
@@ -198,7 +198,7 @@ class DETRHead(nn.Module):
         #print(scaled_similarity[0])
         
         #max 추출 
-        max_per_patch, max_text_idx = scaled_similarity.max(dim=-1) # (batch_size, N_p+1)
+        max_per_patch, max_text_idx = scaled_similarity.max(dim=-1) # (batch_size, N_p + num_queries)
         # max_per_batch, max_patch_idx = max_per_patch.max(dim=-1, keepdim=True) #(bs, 1)
         topk_per_batch, topk_patch_idx = torch.topk(max_per_patch, self.num_queries, -1) #(bs, num_queries)
 
@@ -207,9 +207,9 @@ class DETRHead(nn.Module):
         # ).scatter_(-1, topk_patch_idx, 1.0)
         bs, num_queries = topk_patch_idx.shape
         
-        max_patch_onehot = torch.zeros(bs, num_queries, max_per_patch.size(-1), device=max_per_patch.device)
-        idx = topk_patch_idx.unsqueeze(-1)     # now (bs, num_queries, 1)
-        max_patch_onehot.scatter_(2, idx, 1.0) #(bs, num_queries, N_p+1)
+        max_patch_onehot = torch.zeros(bs, num_queries, max_per_patch.size(-1), device=max_per_patch.device) #(bs, num_queries, N_p + num_queries)
+        idx = topk_patch_idx.unsqueeze(-1)     # (bs, num_queries, 1)
+        max_patch_onehot.scatter_(2, idx, 1.0) #(bs, num_queries, N_p + num_queries)
         
         selected_patch_feat = torch.bmm(max_patch_onehot, img_feat_with_dummy) #(bs, num_queries, embed_dim)
         selected_patch_query = self.query_proj(selected_patch_feat) #그래디언트 Nan 아님
@@ -244,20 +244,27 @@ class DETRHead(nn.Module):
             
             B, C, H, W = pos_embed.shape
             n_patch = img_feat.size(1)
-            dummy_idx = topk_patch_idx == n_patch  #(bs, num_queries)
-            dummy_idx = dummy_idx.all(dim=1) #(bs)
+            dummy_idx = topk_patch_idx >= n_patch  #(bs, num_queries)
+            all_dummy_idx = dummy_idx.all(dim=1) #(bs) #num_queries개수만큼 더미가 모두 뽑혔을 때 dummy_idx는 True
 
             #더미 뽑힌 횟수
-            num_dummy = dummy_idx.sum()
+            num_all_dummy = all_dummy_idx.sum()
             #No-target일때 더미 뽑힌 횟수
-            no_target = torch.tensor([0]*B, device=dummy_idx.device)
+            no_target = torch.tensor([0]*B, device=all_dummy_idx.device)
             for i, meta in enumerate(img_metas):
                 for target in meta['target']:
                     if target['category_id']==-1:
                         no_target[i]=1
             num_no_target = no_target.sum()
-            num_dummy_no_target = (dummy_idx & (no_target == 1)).sum()
-            dummy_dict = {'num_dummy': num_dummy, 'num_no_target' : num_no_target, 'num_accurate_dummy': num_dummy_no_target, 'dummy_idx': dummy_idx}
+            num_accurate_dummy = (all_dummy_idx & (no_target == 1)).sum()
+            #더미 비율
+            no_target_mask = no_target.bool()
+            dummy_ratio_of_no_target = dummy_idx[no_target_mask, :].sum(dim=1) /self.num_queries #(num_no_target)
+            sum_dummy_ratio_of_no_target = dummy_ratio_of_no_target.sum()
+            dummy_ratio_of_others = dummy_idx[~no_target_mask, :].sum(dim=1) /self.num_queries #(num_others)
+            sum_dummy_ratio_of_others = dummy_ratio_of_others.sum()
+            
+            dummy_dict = {'num_all_dummy': num_all_dummy, 'num_no_target' : num_no_target, 'num_accurate_dummy': num_accurate_dummy, 'dummy_idx': dummy_idx, 'sum_dummy_ratio_of_no_target' : sum_dummy_ratio_of_no_target, 'sum_dummy_ratio_of_others' : sum_dummy_ratio_of_others}
             
             # h_idx = top1_idx // W
             # w_idx = top1_idx % W
@@ -272,6 +279,19 @@ class DETRHead(nn.Module):
             # # 대체: dummy_idx=False인 경우에만 교체
             # query_embed[valid_batch, :] = selected_pos
 
+            # Normalize to unit vectors
+            normalized = F.normalize(self.dummy_token, dim=1)  # [num_queries, in_channels]
+            
+            # Cosine similarity matrix
+            cos_sim_matrix = torch.matmul(normalized, normalized.T)  # [num_queries, num_queries]
+            
+            # Target similarity: identity = 1, else = -1
+            identity = torch.eye(self.num_queries, device=cos_sim_matrix.device)
+            target = -1.0 * (1.0 - identity)
+            
+            # MSE loss between actual similarity and target (-1 off-diagonal, 1 diagonal)
+            loss_dummy_div = F.mse_loss(cos_sim_matrix, target)
+
         else:
             query_embed = self.query_embed.weight
 
@@ -285,10 +305,17 @@ class DETRHead(nn.Module):
         outputs_coord = self.bbox_embed(hidden_states) #MLP(input_dim=embed_dim, hidden_dim=embed_dim, output_dim=4, num_layers=3) #outputs_coord: [num_decoder_layer, bs, num_query, 4]
 
         #더미토큰 처리
+        dummy_mask = dummy_idx.unsqueeze(0).unsqueeze(-1)
         replacement_class = torch.tensor([-1000.0, 0.0], device=outputs_class.device)
-        outputs_class[:, dummy_idx, :, :] = replacement_class.view(1, 1, 1, 2).expand(outputs_class.size(0), dummy_idx.sum(), self.num_queries, 2)
         replacement_box = torch.tensor([-1000.0, -1000.0, -1000.0, -1000.0], device=outputs_coord.device)
-        outputs_coord[:, dummy_idx, :, :] = replacement_box.view(1, 1, 1, 4).expand(outputs_coord.size(0), dummy_idx.sum(), self.num_queries, 4)
+
+        replacement_class = replacement_class.view(1, 1, 1, 2).expand_as(outputs_class)
+        replacement_box = replacement_box.view(1, 1, 1, 4).expand_as(outputs_coord)
+        outputs_class = torch.where(dummy_mask, replacement_class, outputs_class) #[num_decoder_layer, bs, num_query, 2]
+        outputs_coord = torch.where(dummy_mask, replacement_box, outputs_coord) #[num_decoder_layer, bs, num_query, 4]
+        
+        # outputs_class[:, dummy_idx, :, :] = replacement_class.view(1, 1, 1, 2).expand(outputs_class.size(0), dummy_idx.sum(), self.num_queries, 2)
+        # outputs_coord[:, dummy_idx, :, :] = replacement_box.view(1, 1, 1, 4).expand(outputs_coord.size(0), dummy_idx.sum(), self.num_queries, 4)
         outputs_coord = outputs_coord.sigmoid()
 
         # replacement_box = torch.tensor([1e-6, 1e-6, 1e-6, 1e-6], device=outputs_coord.device)
@@ -305,6 +332,7 @@ class DETRHead(nn.Module):
             if k in weight_dict:
                 loss_dict[k] *= weight_dict[k]
         loss_dict["loss_det"] = sum(loss_dict.values()) #최종 loss (giou + l1 + ce)
+        loss_dict['dummy_token_diversity_loss'] = loss_dummy_div
         return loss_dict, output, dummy_dict, similarity, scaled_similarity, scale_factor
 
         # proj_queries = F.normalize(self.contrastive_align_projection_image(logits), p=2, dim=-1)

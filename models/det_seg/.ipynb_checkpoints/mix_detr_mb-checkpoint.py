@@ -85,16 +85,12 @@ class MIXDETRMB(OneStageModel):
         #print('ref_expr_inds', ref_expr_inds)
 
         img_feat, text_feat, cls_feat = self.extract_visual_language(img, ref_expr_inds, text_attention_mask, sentence_token_flag=self.beit_sentence_token_flag)
-        
+
         if self.beit_sentence_token_flag==True or self.exis_encoder_flag==True:
-            
             if self.beit_sentence_token_flag==True:
                 text_feat, sent_feat = text_feat[:, :-1, :], text_feat[:, -1, :]
             else:
-                #mask_for_exisenc
-                spec_token_mask = (ref_expr_inds == 2) | (ref_expr_inds == 0)
-                combined_mask = spec_token_mask | text_attention_mask
-                sent_feat = self.exisenc(img_feat, text_feat, text_mask=combined_mask, img_metas=img_metas) #(bs, embed_dim)
+                sent_feat = self.exisenc(img_feat, text_feat, text_mask=text_attention_mask, img_metas=img_metas) #(bs, embed_dim)
             
             #FC -> exis score
             exis_scores = self.exis_proj(sent_feat) #(bs, 1)
@@ -172,13 +168,15 @@ class MIXDETRMB(OneStageModel):
         
         img_feat_trans = img_feat.transpose(-1, -2).reshape(B, -1, H // self.patch_size, W // self.patch_size)
 
-        print(text_attention_mask[:, 0])
-        print(text_attention_mask[:, -1])
-        text_attention_mask[:, 0], text_attention_mask[:, -1] = 1, 1
-
+        #text_attention_mask[:, 0], text_attention_mask[:, -1] = 1, 1
+        
+        #mask_for_spec_token
+        spec_token_mask = (ref_expr_inds == 2) | (ref_expr_inds == 0)
+        combined_mask = spec_token_mask | text_attention_mask
+        
         #detr head
         losses_dict, output, dummy_dict, similarity, scaled_similarity, scale_factor = self.head.forward_train(
-            img_feat_trans, img_feat, img_metas, text_feat=text_feat, text_scores=scores, text_mask=text_attention_mask, gt_bbox=gt_bbox, epoch=epoch #img_feat, img_metas, cls_feat=cls_feat, gt_bbox=gt_bbox, text_feat=text_feat, text_mask=text_attention_mask
+            img_feat_trans, img_feat, img_metas, text_feat=text_feat, text_scores=scores, text_mask=combined_mask, gt_bbox=gt_bbox, epoch=epoch #img_feat, img_metas, cls_feat=cls_feat, gt_bbox=gt_bbox, text_feat=text_feat, text_mask=text_attention_mask
         )
         #output_token_branch = output["token_branch_output"]
         #output_decoder_branch = output["decoder_branch_output"]
@@ -204,7 +202,7 @@ class MIXDETRMB(OneStageModel):
         if (epoch + 1 in [0, 1] or (epoch + 1) % 5 == 0): 
             #similarity 마스킹
             # 1) bool mask로 변환 (필요하다면)
-            attn_mask = text_attention_mask.bool()           # (bs, max_seq_len)
+            attn_mask = combined_mask.bool()           # (bs, max_seq_len)
             
             # 2) 패치 축 추가 및 확장
             attn_mask = attn_mask.unsqueeze(1)               # (bs, 1, max_seq_len)
@@ -253,10 +251,11 @@ class MIXDETRMB(OneStageModel):
                     #샘플별 exis prob
                     exis_prob_per_sample = exis_probs[i].item()
                     #샘플별 더미 추출 여부
-                    dummy_extract = dummy_dict['dummy_idx'][i].item()
-                    if dummy_extract ==True:
-                        dummy_extract='Yes'
-                    else: dummy_extract='No'
+                    all_dummy_idx = dummy_dict['dummy_idx'].all(dim=1)
+                    all_dummy_extract = all_dummy_idx[i].item()
+                    if all_dummy_extract ==True:
+                        all_dummy_extract='Yes'
+                    else: all_dummy_extract='No'
                     
                 
                     # 그룹 폴더(others/, no_target/)만 생성
@@ -300,7 +299,7 @@ class MIXDETRMB(OneStageModel):
                 
                     # 파일명에 샘플 인덱스 포함해서 저장
                     save_path = os.path.join(group_folder, f"{group}sample_{i}.png")
-                    fig.text(0.9, 0.97, f"exis prob: {exis_prob_per_sample:.2f}\nSF : {scale_not_dum:.2f}| {scale_dum:.2f}\ndummy extract?: {dummy_extract}")
+                    fig.text(0.9, 0.97, f"exis prob: {exis_prob_per_sample:.2f}\nSF : {scale_not_dum:.2f}| {scale_dum:.2f}\nall dummy extract?: {all_dummy_extract}")
                     fig.savefig(save_path, dpi=130, bbox_inches='tight')
                     plt.close(fig)
         else:
@@ -411,14 +410,28 @@ class MIXDETRMB(OneStageModel):
             height = image_size[0]
             width = image_size[1]
 
-            if is_dummy:
-                new_box = torch.tensor([[0.0, 0.0, 1e-6, 1e-6]], device=results_per_image.pred_boxes.tensor.device)
-                results_per_image.pred_boxes = Boxes(new_box)
+            if is_dummy.any():
+                # 원본 box tensor
+                boxes = results_per_image.pred_boxes.tensor  # shape: [num_query, 4]
+                # 대체할 더미 박스
+                dummy_box = torch.tensor([0.0, 0.0, 1e-6, 1e-6], device=boxes.device)
+                # is_dummy mask를 broadcast해서 [num_query, 4]로 확장
+                mask = is_dummy.unsqueeze(-1).expand_as(boxes)
+                # dummy_box를 is_dummy 위치에 대입
+                new_boxes = torch.where(mask, dummy_box, boxes)
+                # 결과 저장
+                results_per_image.pred_boxes = Boxes(new_boxes)
             #예측결과 후처리 - 이미지 크기에 맞는 최종 결과 생성 (ex. 좌표 변환, 스케일 복원)
             r = detector_postprocess(results_per_image, height, width)
-            if is_dummy:
-                new_box = torch.tensor([[0.0, 0.0, 0.0, 0.0]], device=results_per_image.pred_boxes.tensor.device)
-                r.pred_boxes = Boxes(new_box)
+            if is_dummy.any():
+                # 원본 box tensor
+                boxes = results_per_image.pred_boxes.tensor  # shape: [num_query, 4]
+                # 대체할 더미 박스
+                dummy_box = torch.tensor([0.0, 0.0, 0.0, 0.0], device=boxes.device)
+                # dummy_box를 is_dummy 위치에 대입
+                original_boxes = torch.where(mask, dummy_box, boxes)
+                # 결과 저장
+                r.pred_boxes = Boxes(original_boxes)
 
             # infomation extract
             pred_box = r.pred_boxes.tensor #(n_q, 4)

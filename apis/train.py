@@ -58,9 +58,11 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
     num_image_all = 0
     #-------------------------------
     dummy_dict_all = {
-        'num_dummy': torch.tensor(0.0, device=device),
+        'num_all_dummy': torch.tensor(0.0, device=device),
         'num_no_target' : torch.tensor(0.0, device=device),
-        'num_accurate_dummy': torch.tensor(0.0, device=device)
+        'num_accurate_dummy': torch.tensor(0.0, device=device),
+        'sum_dummy_ratio_of_no_target': torch.tensor(0.0, device=device),
+        'sum_dummy_ratio_of_others': torch.tensor(0.0, device=device)
     }
     total_loss= defaultdict(float)
     exis_total_loss = defaultdict(float)
@@ -103,13 +105,12 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
         for (key, size) in zip(exis_keys, batch_sample_size):
             if size > 0:
                 value = loss_exis_score[key]
-                exis_total_loss[key] += value.item() * size 
-            
-    
+                exis_total_loss[key] += value.item() * size
+        dummy_token_diversity_loss = losses.pop("dummy_token_diversity_loss", torch.tensor([0.0], device=device))
         loss_det = losses.get("loss_total", torch.tensor([0.0], device=device))+losses.get("loss_det", torch.tensor([0.0], device=device))
         loss_exis_score_mean = loss_exis_score.get("loss_score_mean", torch.tensor([0.0], device=device))
         loss_mask = losses.pop("loss_mask", torch.tensor([0.0], device=device))
-        loss = loss_det + loss_mask #+ loss_exis_score_mean
+        loss = loss_det + loss_mask + loss_exis_score_mean + dummy_token_diversity_loss
         optimizer.zero_grad()
         if cfg.use_fp16:
             with apex.amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -238,6 +239,8 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                 writer.add_scalars(f"Loss/train", avg_loss_dict, x_step) 
                 #train F1, N-acc
                 if batch + 1 == batches:
+                    #해당 배치의 diversity los
+                    writer.add_scalar(f"dummy_diversity_loss/train", dummy_token_diversity_loss, x_step)
                     #전체 exis loss
                     sample_sizes = [total_sample, dummy_dict_all['num_no_target'], total_sample-dummy_dict_all['num_no_target']]
                     avg_exis_loss_dict = {k:v / sample_size for (k, v), sample_size in zip(exis_total_loss.items(), sample_sizes)}
@@ -252,15 +255,17 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                     writer.add_scalars(f"f1", {"train_f1":F1_score_all.item()}, x_step)
                     writer.add_scalars(f"N-acc", {"train_N-acc":N_acc_all.item()}, x_step)
                     #전체 Dummy precision
-                    dummy_precision_all = dummy_dict_all['num_accurate_dummy']/dummy_dict_all['num_dummy']
-                    writer.add_scalars(f"dummy_train", {"train_dummy_precision":dummy_precision_all.item()}, x_step)
+                    dummy_precision_all = dummy_dict_all['num_accurate_dummy']/dummy_dict_all['num_all_dummy']
+                    writer.add_scalars(f"dummy_metric/train", {"train_dummy_precision":dummy_precision_all.item()}, x_step)
                     #전체 Dummy recall
                     dummy_recall_all = dummy_dict_all['num_accurate_dummy']/dummy_dict_all['num_no_target']
-                    writer.add_scalars(f"dummy_train", {"train_dummy_recall":dummy_recall_all.item()}, x_step)
+                    writer.add_scalars(f"dummy_metric/train", {"train_dummy_recall":dummy_recall_all.item()}, x_step)
                     dummy_f1_all = 2*(dummy_precision_all*dummy_recall_all)/(dummy_precision_all+dummy_recall_all)
-                    writer.add_scalars(f"dummy_train", {"train_dummy_f1":dummy_f1_all.item()}, x_step)
-                    writer.add_scalars(f"dummy_num_train", {"train_dummy_num":dummy_dict_all['num_dummy'].item()}, x_step)
-                    print('dummy_num', dummy_dict_all['num_dummy'].item(), 'dummy_precision_all', dummy_precision_all.item(), 'dummy_recall_all',
+                    writer.add_scalars(f"dummy_metric/train", {"train_dummy_f1":dummy_f1_all.item()}, x_step)
+                    writer.add_scalars(f"dummy_num/train", {"train_dummy_num":dummy_dict_all['num_all_dummy'].item()}, x_step)
+                    #전체 dummy ratio
+                    writer.add_scalars(f"extract_dummy_ratio/train", {"no-target":dummy_dict_all['sum_dummy_ratio_of_no_target'].item()/sample_sizes[1], "others":dummy_dict_all['sum_dummy_ratio_of_others'].item()/sample_sizes[2]}, x_step)
+                    print('dummy_num', dummy_dict_all['num_all_dummy'].item(), 'dummy_precision_all', dummy_precision_all.item(), 'dummy_recall_all',
                           dummy_recall_all.item(), 'dummy_f1_all', dummy_f1_all.item())
                     #dev
                     if dev is not None:
