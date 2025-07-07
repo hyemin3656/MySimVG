@@ -142,7 +142,7 @@ class DETRHead(nn.Module):
         return x_mask, x_pos_embeds
 
     def language_guided_query_selection(self, text_feat, img_feat, text_scores, text_mask, epoch=None):
-        #text_scores : (bs, max_seq_len)
+        #text_scores : (bs, 1)
         nan_mask = text_mask.bool().unsqueeze(1) #(bs, 1, max_seq_len)
         dummy_token_expanded = self.dummy_token.unsqueeze(0).expand(img_feat.size(0), -1, -1)
         # if epoch>=10:
@@ -183,10 +183,14 @@ class DETRHead(nn.Module):
         def not_dummy_func(x):
             return -0.59 * torch.log(-x + 1.22) + 0.12
 
-        text_scores_expan_no_dum = text_scores.unsqueeze(1).expand(-1, img_feat.size(1), -1)
-        not_dummy_scale_factor = not_dummy_func(text_scores_expan_no_dum)
-        text_scores_expan_dum = text_scores.unsqueeze(1).expand(-1, self.num_queries, -1)
-        dummy_scale_factor = dummy_func(text_scores_expan_dum)
+        not_dummy_scale_factor = not_dummy_func(text_scores)
+        not_dummy_scale_factor = not_dummy_scale_factor.expand(-1, text_feat.size(1)) #(bs, max_seq_len)
+        not_dummy_scale_factor = not_dummy_scale_factor.unsqueeze(1).expand(-1, img_feat.size(1), -1)
+
+        dummy_scale_factor = dummy_func(text_scores)
+        dummy_scale_factor = dummy_scale_factor.expand(-1, text_feat.size(1)) #(bs, max_seq_len)
+        dummy_scale_factor = dummy_scale_factor.unsqueeze(1).expand(-1, self.num_queries, -1)
+
         scale_factor = torch.cat([not_dummy_scale_factor, dummy_scale_factor], dim=1) #(bs, N_p + num_queries, max_seq_len)
         scaled_similarity = scale_factor * similarity_norm
 
@@ -259,12 +263,37 @@ class DETRHead(nn.Module):
             num_accurate_dummy = (all_dummy_idx & (no_target == 1)).sum()
             #더미 비율
             no_target_mask = no_target.bool()
-            dummy_ratio_of_no_target = dummy_idx[no_target_mask, :].sum(dim=1) /self.num_queries #(num_no_target)
-            sum_dummy_ratio_of_no_target = dummy_ratio_of_no_target.sum()
+            if no_target_mask.any():
+                dummy_ratio_of_no_target = dummy_idx[no_target_mask, :].sum(dim=1) /self.num_queries #(num_no_target)
+                sum_dummy_ratio_of_no_target = dummy_ratio_of_no_target.sum()
+            else:
+                sum_dummy_ratio_of_no_target = None
+            
             dummy_ratio_of_others = dummy_idx[~no_target_mask, :].sum(dim=1) /self.num_queries #(num_others)
             sum_dummy_ratio_of_others = dummy_ratio_of_others.sum()
+
+            #scale factor 0.7기준 양상
+            is_over_cross = text_scores[:, 0]>=0.7 #(bs)
+            no_target_is_over_cross = is_over_cross[no_target_mask] #(num_no_target)
+            all_dummy_idx_no_target = all_dummy_idx[no_target_mask] #(num_no_target)
+            yes_dum_no_target_is_over_cross = no_target_is_over_cross & all_dummy_idx_no_target #(num_no_target)
             
-            dummy_dict = {'num_all_dummy': num_all_dummy, 'num_no_target' : num_no_target, 'num_accurate_dummy': num_accurate_dummy, 'dummy_idx': dummy_idx, 'sum_dummy_ratio_of_no_target' : sum_dummy_ratio_of_no_target, 'sum_dummy_ratio_of_others' : sum_dummy_ratio_of_others}
+            if no_target_is_over_cross.any():
+                ratio_over_cross = yes_dum_no_target_is_over_cross.sum() /no_target_is_over_cross.sum()
+            else:
+                ratio_over_cross = None
+            
+            yes_dum_no_target_is_under_cross = (~no_target_is_over_cross) & all_dummy_idx_no_target #(num_no_target)
+            if (~no_target_is_over_cross).any():
+                ratio_under_cross = yes_dum_no_target_is_under_cross.sum() / (~no_target_is_over_cross).sum()
+            else:
+                ratio_under_cross = None
+            
+
+            
+            
+            
+            dummy_dict = {'num_all_dummy': num_all_dummy, 'num_no_target' : num_no_target, 'num_accurate_dummy': num_accurate_dummy, 'dummy_idx': dummy_idx, 'sum_dummy_ratio_of_no_target' : sum_dummy_ratio_of_no_target, 'sum_dummy_ratio_of_others' : sum_dummy_ratio_of_others, 'ratio_over_cross_blah': ratio_over_cross, 'ratio_under_cross_blah' : ratio_under_cross}
             
             # h_idx = top1_idx // W
             # w_idx = top1_idx % W
@@ -279,6 +308,7 @@ class DETRHead(nn.Module):
             # # 대체: dummy_idx=False인 경우에만 교체
             # query_embed[valid_batch, :] = selected_pos
 
+            #diversity loss
             # Normalize to unit vectors
             normalized = F.normalize(self.dummy_token, dim=1)  # [num_queries, in_channels]
             
@@ -291,6 +321,17 @@ class DETRHead(nn.Module):
             
             # MSE loss between actual similarity and target (-1 off-diagonal, 1 diagonal)
             loss_dummy_div = F.mse_loss(cos_sim_matrix, target)
+
+            #NT dummy loss
+            if no_target_mask.any():
+                nan_mask = text_mask.bool().unsqueeze(1) #(bs, 1, max_seq_len)
+                expanded_mask = nan_mask.expand(-1, similarity.size(1), -1) 
+                masked_similarity = similarity.masked_fill(expanded_mask, 1)
+                similarity_NT_dummy = masked_similarity[no_target_mask, -self.num_queries:, :]
+                nt_dummy_loss = F.mse_loss(similarity_NT_dummy, torch.ones_like(similarity_NT_dummy))
+            else:
+                nt_dummy_loss = torch.tensor(0.0, device=similarity.device)
+
 
         else:
             query_embed = self.query_embed.weight
@@ -333,6 +374,7 @@ class DETRHead(nn.Module):
                 loss_dict[k] *= weight_dict[k]
         loss_dict["loss_det"] = sum(loss_dict.values()) #최종 loss (giou + l1 + ce)
         loss_dict['dummy_token_diversity_loss'] = loss_dummy_div
+        loss_dict['nt_dummy_loss'] = nt_dummy_loss
         return loss_dict, output, dummy_dict, similarity, scaled_similarity, scale_factor
 
         # proj_queries = F.normalize(self.contrastive_align_projection_image(logits), p=2, dim=-1)

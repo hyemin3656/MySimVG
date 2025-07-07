@@ -178,6 +178,8 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
     device = list(model.parameters())[0].device
 
     batches = len(loader)
+    batches_for_check_under = batches
+    batches_for_check_over = batches
     end = time.time()
 
     with_bbox, with_mask = False, False
@@ -205,7 +207,9 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
             'num_no_target' : torch.tensor(0.0, device=device),
             'num_accurate_dummy': torch.tensor(0.0, device=device),
             'sum_dummy_ratio_of_no_target': torch.tensor(0.0, device=device),
-            'sum_dummy_ratio_of_others': torch.tensor(0.0, device=device)
+            'sum_dummy_ratio_of_others': torch.tensor(0.0, device=device),
+            'ratio_over_cross_blah': torch.tensor(0.0, device=device),
+            'ratio_under_cross_blah': torch.tensor(0.0, device=device)
         }
         selected_keys = ['loss_class', 'loss_bbox', 'loss_giou', 'loss_det']
         exis_keys = ['loss_score_mean', 'no_target_los_mean', 'others_los_mean']
@@ -253,7 +257,8 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                 if size > 0:
                     value = loss_exis_score[key]
                     exis_total_loss[key] += value.item() * size
-            dummy_token_diversity_loss = losses.pop("dummy_token_diversity_loss", torch.tensor([0.0], device=device))
+            dummy_token_diversity_loss = losses_dict.pop("dummy_token_diversity_loss", torch.tensor([0.0], device=device))
+            nt_dummy_loss = losses_dict.pop("nt_dummy_loss", torch.tensor([0.0], device=device))
             if not isinstance(predictions, list):
                 predictions_list = [predictions]
             else:
@@ -304,7 +309,13 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                     n_acc_dict[predict_type] = n_acc
                     #dummy
                     for key in dummy_dict_all.keys():
-                        dummy_dict_all[key] += dummy_dict[key]
+                        if dummy_dict[key] != None:
+                            dummy_dict_all[key] += dummy_dict[key]
+                        else:
+                            if key == "ratio_over_cross_blah":
+                                batches_for_check_over -= 1 
+                            if key == "ratio_under_cross_blah":
+                                batches_for_check_under -= 1 
 
             # logging informations
             if is_main() and ((batch + 1) % cfg.log_interval == 0 or batch + 1 == batches):
@@ -331,7 +342,7 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                         + f"time: {(time.time()- end):.2f}, "
                         + F1_Score_str
                         + n_acc_str
-                        + f"num_dummy: {dummy_dict['num_dummy'].item()}"
+                        + f"num_dummy: {dummy_dict['num_all_dummy'].item()}"
                         + f"num_no_target: {dummy_dict['num_no_target'].item()}"
                     )
             
@@ -359,9 +370,10 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
             #전체 exis loss
             sample_sizes = [total_sample, dummy_dict_all['num_no_target'], total_sample-dummy_dict_all['num_no_target']]
             avg_exis_loss_dict = {k:v / sample_size for (k, v), sample_size in zip(exis_total_loss.items(), sample_sizes)}
+            writer.add_scalars(f"Exis_Loss/val", avg_exis_loss_dict, x_step)
             #해당 배치의 diversity loss
             writer.add_scalar(f"dummy_diversity_loss/val", dummy_token_diversity_loss, x_step)
-            writer.add_scalars(f"Exis_Loss/val", avg_exis_loss_dict, x_step)
+            writer.add_scalar(f"nt_dummy_loss/val", nt_dummy_loss, x_step)
             #val F1, N-acc
             writer.add_scalars(f"f1", {"val_f1":F1_score_all.item()}, x_step)
             writer.add_scalars(f"N-acc", {"val_N-acc":N_acc_all.item()}, x_step)
@@ -370,18 +382,18 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
             print("val_N-acc:", N_acc_all)
 
             #전체 Dummy precision
-            dummy_precision_all = dummy_dict_all['num_accurate_dummy']/dummy_dict_all['num_dummy']
-            writer.add_scalars(f"dummy_metric/val", {"val_dummy_precision":dummy_precision_all.item()}, x_step)
+            dummy_precision_all = dummy_dict_all['num_accurate_dummy']/dummy_dict_all['num_all_dummy']
+            writer.add_scalars(f"dummy_metric/val", {"dummy_precision":dummy_precision_all.item()}, x_step)
             #전체 Dummy recall
             dummy_recall_all = dummy_dict_all['num_accurate_dummy']/dummy_dict_all['num_no_target']
-            writer.add_scalars(f"dummy_metric/val", {"val_dummy_recall":dummy_recall_all.item()}, x_step)
+            writer.add_scalars(f"dummy_metric/val", {"dummy_recall":dummy_recall_all.item()}, x_step)
             dummy_f1_all = 2*(dummy_precision_all*dummy_recall_all)/(dummy_precision_all+dummy_recall_all)
-            writer.add_scalars(f"dummy_metric/val", {"val_dummy_f1":dummy_f1_all.item()}, x_step)
-            writer.add_scalars(f"dummy_num/val", {"val_dummy_num":dummy_dict_all['num_dummy'].item()}, x_step)
+            writer.add_scalars(f"dummy_metric/val", {"dummy_f1":dummy_f1_all.item()}, x_step)
+            writer.add_scalars(f"dummy_ratio/val", {"dummy_num/total_size":dummy_dict_all['num_all_dummy'].item()/sample_sizes[0]}, x_step)
             #전체 dummy ratio
             writer.add_scalars(f"extract_dummy_ratio/val", {"no-target":dummy_dict_all['sum_dummy_ratio_of_no_target'].item()/sample_sizes[1],
                                                             "others":dummy_dict_all['sum_dummy_ratio_of_others'].item()/sample_sizes[2]}, x_step)
-            print('dummy_num', dummy_dict_all['num_dummy'].item(), 'dummy_precision_all', dummy_precision_all.item(), 'dummy_recall_all', dummy_recall_all.item(), 'dummy_f1_all', dummy_f1_all.item())
+            print('dummy_num', dummy_dict_all['num_all_dummy'].item(), 'dummy_precision_all', dummy_precision_all.item(), 'dummy_recall_all', dummy_recall_all.item(), 'dummy_f1_all', dummy_f1_all.item())
 
             #dev
             if dev is not None:
@@ -393,6 +405,11 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                     'dotpro':  dev['others']['dotpro']/ (total_sample - dummy_dict_all['num_no_target']),
                     'scaled':  dev['others']['scaled']/ (total_sample - dummy_dict_all['num_no_target'])
                 }, x_step)
+            #ratio_under/over_cross_blah
+            writer.add_scalars(f"ratio_cross_blah/val", {
+                'yes_dum_no_target_over_cross' : dummy_dict_all['ratio_over_cross_blah']/batches_for_check_over,
+                'yes_dum_no_target_under_cross' : dummy_dict_all['ratio_under_cross_blah']/batches_for_check_under
+            }, x_step)
                                    
     if not cfg["dataset"] == "GRefCOCO":
         det_acc = sum(list(det_acc_dict.values())) / len(det_acc_dict)

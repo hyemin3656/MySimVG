@@ -43,6 +43,8 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
     device = list(model.parameters())[0].device
 
     batches = len(loader)
+    batches_for_check_over = batches
+    batches_for_check_under = batches
     end = time.time()
 
     loss_det_list, det_acc_list, n_acc_list, f1_score_list = (defaultdict(list), defaultdict(list), defaultdict(list), defaultdict(list))
@@ -62,7 +64,9 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
         'num_no_target' : torch.tensor(0.0, device=device),
         'num_accurate_dummy': torch.tensor(0.0, device=device),
         'sum_dummy_ratio_of_no_target': torch.tensor(0.0, device=device),
-        'sum_dummy_ratio_of_others': torch.tensor(0.0, device=device)
+        'sum_dummy_ratio_of_others': torch.tensor(0.0, device=device),
+        'ratio_over_cross_blah': torch.tensor(0.0, device=device),
+        'ratio_under_cross_blah': torch.tensor(0.0, device=device)
     }
     total_loss= defaultdict(float)
     exis_total_loss = defaultdict(float)
@@ -107,10 +111,11 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                 value = loss_exis_score[key]
                 exis_total_loss[key] += value.item() * size
         dummy_token_diversity_loss = losses.pop("dummy_token_diversity_loss", torch.tensor([0.0], device=device))
+        nt_dummy_loss = losses.pop("nt_dummy_loss", torch.tensor([0.0], device=device))
         loss_det = losses.get("loss_total", torch.tensor([0.0], device=device))+losses.get("loss_det", torch.tensor([0.0], device=device))
         loss_exis_score_mean = loss_exis_score.get("loss_score_mean", torch.tensor([0.0], device=device))
         loss_mask = losses.pop("loss_mask", torch.tensor([0.0], device=device))
-        loss = loss_det + loss_mask + loss_exis_score_mean + dummy_token_diversity_loss
+        loss = loss_det + loss_mask + loss_exis_score_mean + dummy_token_diversity_loss + nt_dummy_loss
         optimizer.zero_grad()
         if cfg.use_fp16:
             with apex.amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -193,7 +198,13 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
 
                 #dummy
                 for key in dummy_dict_all.keys():
-                    dummy_dict_all[key] += dummy_dict[key]
+                    if dummy_dict[key] != None:
+                        dummy_dict_all[key] += dummy_dict[key]
+                    else:
+                        if key == "ratio_over_cross_blah":
+                            batches_for_check_over -= 1 
+                        if key == "ratio_under_cross_blah":
+                            batches_for_check_under -= 1
                     
         # logging informations
         if is_main() and ((batch + 1) % cfg.log_interval == 0 or batch + 1 == batches):
@@ -241,6 +252,7 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                 if batch + 1 == batches:
                     #해당 배치의 diversity los
                     writer.add_scalar(f"dummy_diversity_loss/train", dummy_token_diversity_loss, x_step)
+                    writer.add_scalar(f"nt_dummy_loss/train", nt_dummy_loss, x_step)
                     #전체 exis loss
                     sample_sizes = [total_sample, dummy_dict_all['num_no_target'], total_sample-dummy_dict_all['num_no_target']]
                     avg_exis_loss_dict = {k:v / sample_size for (k, v), sample_size in zip(exis_total_loss.items(), sample_sizes)}
@@ -256,13 +268,13 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                     writer.add_scalars(f"N-acc", {"train_N-acc":N_acc_all.item()}, x_step)
                     #전체 Dummy precision
                     dummy_precision_all = dummy_dict_all['num_accurate_dummy']/dummy_dict_all['num_all_dummy']
-                    writer.add_scalars(f"dummy_metric/train", {"train_dummy_precision":dummy_precision_all.item()}, x_step)
+                    writer.add_scalars(f"dummy_metric/train", {"dummy_precision":dummy_precision_all.item()}, x_step)
                     #전체 Dummy recall
                     dummy_recall_all = dummy_dict_all['num_accurate_dummy']/dummy_dict_all['num_no_target']
-                    writer.add_scalars(f"dummy_metric/train", {"train_dummy_recall":dummy_recall_all.item()}, x_step)
+                    writer.add_scalars(f"dummy_metric/train", {"dummy_recall":dummy_recall_all.item()}, x_step)
                     dummy_f1_all = 2*(dummy_precision_all*dummy_recall_all)/(dummy_precision_all+dummy_recall_all)
-                    writer.add_scalars(f"dummy_metric/train", {"train_dummy_f1":dummy_f1_all.item()}, x_step)
-                    writer.add_scalars(f"dummy_num/train", {"train_dummy_num":dummy_dict_all['num_all_dummy'].item()}, x_step)
+                    writer.add_scalars(f"dummy_metric/train", {"dummy_f1":dummy_f1_all.item()}, x_step)
+                    writer.add_scalars(f"dummy_ratio/train", {"dummy_num/total_size":dummy_dict_all['num_all_dummy'].item()/sample_sizes[0]}, x_step)
                     #전체 dummy ratio
                     writer.add_scalars(f"extract_dummy_ratio/train", {"no-target":dummy_dict_all['sum_dummy_ratio_of_no_target'].item()/sample_sizes[1], "others":dummy_dict_all['sum_dummy_ratio_of_others'].item()/sample_sizes[2]}, x_step)
                     print('dummy_num', dummy_dict_all['num_all_dummy'].item(), 'dummy_precision_all', dummy_precision_all.item(), 'dummy_recall_all',
@@ -277,6 +289,13 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                             'dotpro':  dev['others']['dotpro']/ (total_sample - dummy_dict_all['num_no_target']),
                             'scaled':  dev['others']['scaled']/ (total_sample - dummy_dict_all['num_no_target'])
                         }, x_step)
+                    #ratio_under/over_cross_blah
+                    writer.add_scalars(f"ratio_cross_blah/train", {
+                        'yes_dum_no_target_over_cross' : dummy_dict_all['ratio_over_cross_blah']/batches_for_check_over,
+                        'yes_dum_no_target_under_cross' : dummy_dict_all['ratio_under_cross_blah']/batches_for_check_under
+                    }, x_step)
+
+                    
                     #초기화
                     # total_sample = 0
                     # dummy_dict_all = {

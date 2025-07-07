@@ -135,9 +135,6 @@ class MIXDETRMB(OneStageModel):
             others_per_sample_los = per_sample_los_bce[gt_scores_bool]
             others_los_mean = others_per_sample_los.mean()
 
-            #for LGQS
-            scores = exis_probs.expand(-1, text_feat.size(1)) #(bs, max_seq_len)
-
             #box plot---------------
             if (epoch + 1 in [0, 1] or (epoch + 1) % 5 == 0) and (batch + 1 == batches): #epoch 0일때 train, epoch 5의 배수일 때 train, validation 저장
                 others = exis_probs[gt_scores_bool, :] #others에 해당하는 샘플들의 exis_prob 리스트
@@ -159,7 +156,7 @@ class MIXDETRMB(OneStageModel):
                 plt.savefig(filename)
                 plt.close()  
         else:
-            scores = None
+            exis_probs = None
         #print(text_feat)
         #img_feat:(bs, num_patches, embed_dim)
         #text_feat:(bs, max_seq_len, embed_dim)
@@ -176,7 +173,7 @@ class MIXDETRMB(OneStageModel):
         
         #detr head
         losses_dict, output, dummy_dict, similarity, scaled_similarity, scale_factor = self.head.forward_train(
-            img_feat_trans, img_feat, img_metas, text_feat=text_feat, text_scores=scores, text_mask=combined_mask, gt_bbox=gt_bbox, epoch=epoch #img_feat, img_metas, cls_feat=cls_feat, gt_bbox=gt_bbox, text_feat=text_feat, text_mask=text_attention_mask
+            img_feat_trans, img_feat, img_metas, text_feat=text_feat, text_scores=exis_probs, text_mask=combined_mask, gt_bbox=gt_bbox, epoch=epoch #img_feat, img_metas, cls_feat=cls_feat, gt_bbox=gt_bbox, text_feat=text_feat, text_mask=text_attention_mask
         )
         #output_token_branch = output["token_branch_output"]
         #output_decoder_branch = output["decoder_branch_output"]
@@ -206,8 +203,8 @@ class MIXDETRMB(OneStageModel):
             
             # 2) 패치 축 추가 및 확장
             attn_mask = attn_mask.unsqueeze(1)               # (bs, 1, max_seq_len)
-            attn_mask = attn_mask.expand(-1, similarity.size(1), -1)  
-            # → (bs, num_patches+1, max_seq_len)
+            attn_mask = attn_mask.expand(-1, similarity.size(1), -1)  #(bs, N_p+num_queries, max_seq_len)
+
             
             # 3) -∞ 로 마스킹
             similarity = similarity.masked_fill(attn_mask, float('-inf'))
@@ -219,17 +216,18 @@ class MIXDETRMB(OneStageModel):
             
             
             max_dotpro_np = np.max(dotpro_np, axis = -1) #(batch_size, num_patches+1)
-            devi_dotpro = np.max(max_dotpro_np) - max_dotpro_np[:, -1] #(bs)
+            devi_dotpro = np.max(max_dotpro_np[:, :-1], axis = -1) - max_dotpro_np[:, -1] #(bs)
             max_scaled_np = np.max(scaled_np, axis = -1)
-            devi_scaled = np.max(max_scaled_np) - max_scaled_np[:, -1] #(bs)
+            devi_scaled = np.max(max_scaled_np[:, :-1], axis = -1) - max_scaled_np[:, -1] #(bs)
 
             others_devi_dotpro = devi_dotpro[gt_bool]
             no_target_devi_dotpro = devi_dotpro[~gt_bool]
-
+            
             others_devi_scaled = devi_scaled[gt_bool]
             no_target_devi_scaled = devi_scaled[~gt_bool]
             
             self.dev['no_target']['dotpro'] += no_target_devi_dotpro.sum()
+            #print(self.dev['no_target']['dotpro'])
             self.dev['no_target']['scaled'] += no_target_devi_scaled.sum()
             self.dev['others']['dotpro'] += others_devi_dotpro.sum()
             self.dev['others']['scaled'] += others_devi_scaled.sum()
