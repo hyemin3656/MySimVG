@@ -4,7 +4,8 @@ import numpy
 import torch
 import random
 
-from simvg.apis.test import grec_evaluate_f1_nacc
+#from simvg.apis.test import grec_evaluate_f1_nacc
+from simvg.apis.test import grec_evaluate_f1_nacc_detacc
 
 from .test import accuracy
 from simvg.datasets import extract_data
@@ -58,6 +59,9 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
 }
     correct_image_all = 0
     num_image_all = 0
+    num_ot_all = 0
+    num_correct_ot_all = 0
+    
     #-------------------------------
     dummy_dict_all = {
         'num_all_dummy': torch.tensor(0.0, device=device),
@@ -73,6 +77,7 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
     total_sample = 0
     selected_keys = ['loss_class', 'loss_bbox', 'loss_giou', 'loss_det']
     exis_keys = ['loss_score_mean', 'no_target_los_mean', 'others_los_mean']
+    more_than_two_target = defaultdict(int)
     #torch.autograd.set_detect_anomaly(True)
     for batch, inputs in enumerate(loader):
         data_time = time.time() - end
@@ -85,6 +90,12 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                 gt_bbox = copy.deepcopy(inputs["gt_bbox"])
             else:
                 gt_bbox = copy.deepcopy(inputs["gt_bbox"].data[0])
+            for i in gt_bbox:
+                if i.shape[0]>=3:
+                    shape_str = f'{i.shape[0]}'
+                    more_than_two_target[shape_str]+=1
+            
+
         img_metas = inputs["img_metas"].data[0]
 
         if "gt_mask_rle" in inputs:
@@ -102,7 +113,7 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
         #loss 누적
         for key in selected_keys:
             value = losses[key]
-            total_loss[key] += value.item() * batch_sample
+            total_loss[key] += value.item()
 
         batch_sample_size = [batch_sample, dummy_dict['num_no_target'], batch_sample-dummy_dict['num_no_target']]
         loss_exis_score = losses.pop("loss_exis_score", torch.tensor([0.0], device=device))
@@ -177,24 +188,32 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                 det_acc_dict[predict_type] = det_acc
             else:
                 targets = [meta["target"] for meta in img_metas]
+                
                 with torch.no_grad():
-                    batch_f1_score, batch_n_acc, nt, correct_image, num_image = grec_evaluate_f1_nacc(pred_bboxes, gt_bbox, targets, device=device)
+                    #batch_f1_score, batch_n_acc, nt, correct_image, num_image = grec_evaluate_f1_nacc(pred_bboxes, gt_bbox, targets, device=device)
+                    batch_f1_score, batch_n_acc, batch_det_acc, nt, correct_image, num_image, num_ot, num_correct_ot=grec_evaluate_f1_nacc_detacc(pred_bboxes, gt_bbox, targets, device=device)
                     nt_all['TP']+=nt['TP']
                     nt_all['TN']+=nt['TN']
                     nt_all['FP']+=nt['FP']
                     nt_all['FN']+=nt['FN']
                     correct_image_all+=correct_image
                     num_image_all+=num_image
+                    num_correct_ot_all+=num_correct_ot
+                    num_ot_all+=num_ot
                     if cfg.distributed:
                         batch_f1_score = reduce_mean(batch_f1_score)
                         batch_n_acc = reduce_mean(batch_n_acc)
                 f1_score_list[predict_type].append(batch_f1_score.item())
                 n_acc_list[predict_type].append(batch_n_acc.item())
+                if batch_det_acc!=None:
+                    det_acc_list[predict_type].append(batch_det_acc.item())
                 # loss_det_list[predict_type].append(loss_det.item())
                 f1_score_acc = sum(f1_score_list[predict_type]) / len(f1_score_list[predict_type])
                 n_acc = sum(n_acc_list[predict_type]) / len(n_acc_list[predict_type])
+                det_acc = sum(det_acc_list[predict_type]) / len(det_acc_list[predict_type])
                 f1_score_acc_dict[predict_type] = f1_score_acc
                 n_acc_dict[predict_type] = n_acc
+                det_acc_dict[predict_type] = det_acc
 
                 #dummy
                 for key in dummy_dict_all.keys():
@@ -230,6 +249,8 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                 n_acc_str_list = ["{}_Nacc: {:.2f}, ".format(map_dict[i], n_acc_dict[map_dict[i]]) for i in range(len(predictions_list))]
                 F1_Score_str = "".join(F1_Score_str_list)
                 n_acc_str = "".join(n_acc_str_list)
+                ACC_str_list = ["{}Acc:{:.2f}, ".format(map_dict[i], det_acc_dict[map_dict[i]]) for i in range(len(predictions_list))]
+                ACC_str = "".join(ACC_str_list)
                 logger.info(
                     f"train-epoch[{epoch+1}]-[{batch+1}/{batches}] "
                     + f"time:{(time.time()- end):.2f}, data_time: {data_time:.2f}, "
@@ -238,14 +259,14 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                     + f"lr:{optimizer.param_groups[0]['lr']:.6f}, "
                     + F1_Score_str
                     + n_acc_str
+                    + ACC_str
                     + f"num_acc_dummy: {dummy_dict['num_accurate_dummy'].item()}"
                 )
                 
                 #전체 train detection loss
-                avg_loss_dict = {k: v / total_sample for k, v in total_loss.items()}
+                avg_loss_dict = {k: v / (batch+1) for k, v in total_loss.items()}
                 #Tensorboard
                 x_step = epoch*batches + batch + 1
-                print(x_step)
                 #train loss
                 writer.add_scalars(f"Loss/train", avg_loss_dict, x_step) 
                 #train F1, N-acc
@@ -257,7 +278,6 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                     sample_sizes = [total_sample, dummy_dict_all['num_no_target'], total_sample-dummy_dict_all['num_no_target']]
                     avg_exis_loss_dict = {k:v / sample_size for (k, v), sample_size in zip(exis_total_loss.items(), sample_sizes)}
                     writer.add_scalars(f"Exis_Loss/train", avg_exis_loss_dict, x_step)
-                    print(avg_exis_loss_dict)
                     #전체 N-acc
                     N_acc_all = nt_all["TP"] / (nt_all["TP"] + nt_all["FN"]) if nt_all["TP"] != 0 else torch.tensor(0.0, device=device)
                     N_acc_all = N_acc_all.float() * 100
@@ -266,6 +286,10 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                     F1_score_all = F1_score_all.float() * 100
                     writer.add_scalars(f"f1", {"train_f1":F1_score_all.item()}, x_step)
                     writer.add_scalars(f"N-acc", {"train_N-acc":N_acc_all.item()}, x_step)
+                    #전체 det acc
+                    det_acc_all = num_correct_ot_all/num_ot_all
+                    det_acc_all = det_acc_all.float()*100
+                    writer.add_scalars(f"det_acc", {"train_det_acc":det_acc_all.item()}, x_step)
                     #전체 Dummy precision
                     dummy_precision_all = dummy_dict_all['num_accurate_dummy']/dummy_dict_all['num_all_dummy']
                     writer.add_scalars(f"dummy_metric/train", {"dummy_precision":dummy_precision_all.item()}, x_step)
@@ -302,4 +326,5 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                     # 'num_dummy': torch.tensor(0.0, device=device),
                     # 'num_no_target' : torch.tensor(0.0, device=device),
                     # 'num_accurate_dummy': torch.tensor(0.0, device=device)}
+                    print('num_more_than_two_target', more_than_two_target)
         end = time.time()

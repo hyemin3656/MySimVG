@@ -288,10 +288,7 @@ class DETRHead(nn.Module):
                 ratio_under_cross = yes_dum_no_target_is_under_cross.sum() / (~no_target_is_over_cross).sum()
             else:
                 ratio_under_cross = None
-            
 
-            
-            
             
             dummy_dict = {'num_all_dummy': num_all_dummy, 'num_no_target' : num_no_target, 'num_accurate_dummy': num_accurate_dummy, 'dummy_idx': dummy_idx, 'sum_dummy_ratio_of_no_target' : sum_dummy_ratio_of_no_target, 'sum_dummy_ratio_of_others' : sum_dummy_ratio_of_others, 'ratio_over_cross_blah': ratio_over_cross, 'ratio_under_cross_blah' : ratio_under_cross}
             
@@ -317,7 +314,7 @@ class DETRHead(nn.Module):
             
             # Target similarity: identity = 1, else = -1
             identity = torch.eye(self.num_queries, device=cos_sim_matrix.device)
-            target = -1.0 * (1.0 - identity)
+            target = (2.0 * identity) - 1.0  #대각: 1 / 비대각 : -1
             
             # MSE loss between actual similarity and target (-1 off-diagonal, 1 diagonal)
             loss_dummy_div = F.mse_loss(cos_sim_matrix, target)
