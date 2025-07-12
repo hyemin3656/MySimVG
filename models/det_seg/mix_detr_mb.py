@@ -23,9 +23,9 @@ class MIXDETRMB(OneStageModel):
         super(MIXDETRMB, self).__init__(word_emb, num_token, vis_enc, lan_enc, head, fusion)
         self.patch_size = vis_enc["patch_size"]
         
-        self.beit_sentence_token_flag=False ####
-        self.exis_enc_sentence_token_flag=True
-        self.exis_encoder_flag=True
+        self.beit_sentence_token_flag=False
+        self.exis_enc_sentence_token_flag=True #True
+        self.exis_encoder_flag=True #True
         
         self.exis_proj = nn.Linear(768, 1) 
         self.now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -191,118 +191,125 @@ class MIXDETRMB(OneStageModel):
                 predictions_decoder_branch = self.get_predictions_grec(output_decoder_branch, img_metas, dummy_dict, rescale=rescale)
             
         predictions = [predictions_decoder_branch]
+        if self.beit_sentence_token_flag==True or self.exis_enc_sentence_token_flag==True:
+            #score loss 추가
+            losses_dict['loss_exis_score'] = {'loss_score_mean' : loss_score, 'no_target_los_mean' : no_target_los_mean, 'others_los_mean' : others_los_mean}
 
-        #score loss 추가
-        losses_dict['loss_exis_score'] = {'loss_score_mean' : loss_score, 'no_target_los_mean' : no_target_los_mean, 'others_los_mean' : others_los_mean}
-        
-        #시각화--------------------------------------------------------
-        if (epoch + 1 in [0, 1] or (epoch + 1) % 5 == 0): 
-            #similarity 마스킹
-            # 1) bool mask로 변환 (필요하다면)
-            attn_mask = combined_mask.bool()           # (bs, max_seq_len)
-            
-            # 2) 패치 축 추가 및 확장
-            attn_mask = attn_mask.unsqueeze(1)               # (bs, 1, max_seq_len)
-            attn_mask = attn_mask.expand(-1, similarity.size(1), -1)  #(bs, N_p+num_queries, max_seq_len)
-
-            
-            # 3) -∞ 로 마스킹
-            similarity = similarity.masked_fill(attn_mask, float('-inf'))
-            #편차 계산
-            dotpro_np = similarity.detach().cpu().numpy() #(batch_size, num_patches+1, max_seq_len)
-            scaled_np = scaled_similarity.detach().cpu().numpy() #(batch_size, num_patches+1, max_seq_len)
-            gt_bool = gt_scores.bool().detach().cpu().numpy()
-            batch_size = dotpro_np.shape[0]
-            
-            
-            max_dotpro_np = np.max(dotpro_np, axis = -1) #(batch_size, num_patches+1)
-            devi_dotpro = np.max(max_dotpro_np[:, :-1], axis = -1) - max_dotpro_np[:, -1] #(bs)
-            max_scaled_np = np.max(scaled_np, axis = -1)
-            devi_scaled = np.max(max_scaled_np[:, :-1], axis = -1) - max_scaled_np[:, -1] #(bs)
-
-            others_devi_dotpro = devi_dotpro[gt_bool]
-            no_target_devi_dotpro = devi_dotpro[~gt_bool]
-            
-            others_devi_scaled = devi_scaled[gt_bool]
-            no_target_devi_scaled = devi_scaled[~gt_bool]
-            
-            self.dev['no_target']['dotpro'] += no_target_devi_dotpro.sum()
-            #print(self.dev['no_target']['dotpro'])
-            self.dev['no_target']['scaled'] += no_target_devi_scaled.sum()
-            self.dev['others']['dotpro'] += others_devi_dotpro.sum()
-            self.dev['others']['scaled'] += others_devi_scaled.sum()
-            
-            dev = self.dev
-            
-            if (batch + 1 == batches):
-                self.dev = {'no_target': {'dotpro': 0, 'scaled': 0 }, 'others': {'dotpro': 0, 'scaled': 0 }}
-                #히트맵 시각화
-                if train_flag == True:
-                    output_base = f"{self.now}/heatmap/train/epoch_{epoch}"
-                else:
-                    output_base = f"{self.now}/heatmap/val/epoch_{epoch}"
-                #(batch_size, num_patches+1, max_seq_len)인 similarity와 scaled_similarity
-                    
-                for i in range(batch_size):
-                    # 샘플별 group 결정
-                    group = "others" if gt_bool[i] else "no_target"
-                    #샘플별 exis prob
-                    exis_prob_per_sample = exis_probs[i].item()
-                    #샘플별 더미 추출 여부
-                    all_dummy_idx = dummy_dict['dummy_idx'].all(dim=1)
-                    all_dummy_extract = all_dummy_idx[i].item()
-                    if all_dummy_extract ==True:
-                        all_dummy_extract='Yes'
-                    else: all_dummy_extract='No'
-                    
+        if similarity is not None:
+            #시각화--------------------------------------------------------
+            if (epoch + 1 in [0, 1] or (epoch + 1) % 5 == 0): 
+                #similarity 마스킹
+                # 1) bool mask로 변환 (필요하다면)
+                attn_mask = combined_mask.bool()           # (bs, max_seq_len)
                 
-                    # 그룹 폴더(others/, no_target/)만 생성
-                    group_folder = os.path.join(output_base, group)
-                    os.makedirs(group_folder, exist_ok=True)
-
-                    # 해당 샘플의 히트맵 데이터
-                    m = dotpro_np[i]   # (num_patches+1, max_seq_len)
-                    s = scaled_np[i]   # same shape
-                    
-                    valid_cols = ~np.any(np.isneginf(m), axis=0)
-                    
-                    m = m[:, valid_cols]
-                    s = s[:, valid_cols]
-
-                    # 두 배열의 전체 범위 계산
-                    vmin = min(m.min(), s.min())
-                    vmax = max(m.max(), s.max())
-                    
-                    # 히트맵 나란히 그리기
-                    fig, axes = plt.subplots(1, 2, figsize=(11, 12), tight_layout=True)
-                    im0 = axes[0].imshow(m, aspect='auto', vmin=vmin, vmax=vmax, interpolation='nearest')
-                    axes[0].set_title(f"{group} sample {i} – Dotproduct Sim")
-                    fig.colorbar(im0, ax=axes[0])
+                # 2) 패치 축 추가 및 확장
+                attn_mask = attn_mask.unsqueeze(1)               # (bs, 1, max_seq_len)
+                attn_mask = attn_mask.expand(-1, similarity.size(1), -1)  #(bs, N_p+num_queries, max_seq_len)
+    
                 
-                    im1 = axes[1].imshow(s, aspect='auto', vmin=vmin, vmax=vmax, interpolation='nearest')
-                    axes[1].set_title(f"{group} sample {i} – Scaled Sim")
-                    fig.colorbar(im1, ax=axes[1])
+                # 3) -∞ 로 마스킹
+                similarity = similarity.masked_fill(attn_mask, float('-inf'))
+                #편차 계산
+                dotpro_np = similarity.detach().cpu().numpy() #(batch_size, num_patches+1, max_seq_len)
+                scaled_np = scaled_similarity.detach().cpu().numpy() #(batch_size, num_patches+1, max_seq_len)
+                gt_bool = gt_scores.bool().detach().cpu().numpy()
+                batch_size = dotpro_np.shape[0]
                 
-                    # axis=1 방향 최대값 위치에 빨간 × 표시
-                    for ax, arr in zip(axes, (m, s)):
-                        row_max_cols = np.argmax(arr, axis=1)
-                        rows = np.arange(arr.shape[0])
-                        ax.scatter(row_max_cols, rows, marker='x', c='red', s=20)
-                        ax.set_xlabel("token index")
-                        ax.set_ylabel("patch index")
+                
+                max_dotpro_np = np.max(dotpro_np, axis = -1) #(batch_size, num_patches+1)
+                devi_dotpro = np.max(max_dotpro_np[:, :-1], axis = -1) - max_dotpro_np[:, -1] #(bs)
+                max_scaled_np = np.max(scaled_np, axis = -1)
+                devi_scaled = np.max(max_scaled_np[:, :-1], axis = -1) - max_scaled_np[:, -1] #(bs)
+    
+                others_devi_dotpro = devi_dotpro[gt_bool]
+                no_target_devi_dotpro = devi_dotpro[~gt_bool]
+                
+                others_devi_scaled = devi_scaled[gt_bool]
+                no_target_devi_scaled = devi_scaled[~gt_bool]
+                
+                self.dev['no_target']['dotpro'] += no_target_devi_dotpro.sum()
+                #print(self.dev['no_target']['dotpro'])
+                self.dev['no_target']['scaled'] += no_target_devi_scaled.sum()
+                self.dev['others']['dotpro'] += others_devi_dotpro.sum()
+                self.dev['others']['scaled'] += others_devi_scaled.sum()
+                
+                dev = self.dev
+                
+                if (batch + 1 == batches):
+                    self.dev = {'no_target': {'dotpro': 0, 'scaled': 0 }, 'others': {'dotpro': 0, 'scaled': 0 }}
+                    #히트맵 시각화
+                    if train_flag == True:
+                        output_base = f"{self.now}/heatmap/train/epoch_{epoch}"
+                    else:
+                        output_base = f"{self.now}/heatmap/val/epoch_{epoch}"
+                    #(batch_size, num_patches+1, max_seq_len)인 similarity와 scaled_similarity
+                    num_others = 0
+                    for i in range(batch_size):
+                        # 샘플별 group 결정
+                        group = "others" if gt_bool[i] else "no_target"
+                        if group == "others":
+                            num_others+=1
+                            if num_others >=5:
+                                continue
+                        #샘플별 exis prob
+                        exis_prob_per_sample = exis_probs[i].item()
+                        #샘플별 더미 추출 여부
+                        all_dummy_idx = dummy_dict['dummy_idx'].all(dim=1)
+                        all_dummy_extract = all_dummy_idx[i].item()
+                        if all_dummy_extract ==True:
+                            all_dummy_extract='Yes'
+                        else: all_dummy_extract='No'
                         
-                    #scale factor
-                    scale_not_dum = scale_factor[i, 0, 0]
-                    scale_dum = scale_factor[i, -1, 0]
-                
-                    # 파일명에 샘플 인덱스 포함해서 저장
-                    save_path = os.path.join(group_folder, f"{group}sample_{i}.png")
-                    fig.text(0.9, 0.97, f"exis prob: {exis_prob_per_sample:.2f}\nSF : {scale_not_dum:.2f}| {scale_dum:.2f}\nall dummy extract?: {all_dummy_extract}")
-                    fig.savefig(save_path, dpi=130, bbox_inches='tight')
-                    plt.close(fig)
+                    
+                        # 그룹 폴더(others/, no_target/)만 생성
+                        group_folder = os.path.join(output_base, group)
+                        os.makedirs(group_folder, exist_ok=True)
+    
+                        # 해당 샘플의 히트맵 데이터
+                        m = dotpro_np[i]   # (num_patches+1, max_seq_len)
+                        s = scaled_np[i]   # same shape
+                        
+                        valid_cols = ~np.any(np.isneginf(m), axis=0)
+                        
+                        m = m[:, valid_cols]
+                        s = s[:, valid_cols]
+    
+                        # 두 배열의 전체 범위 계산
+                        vmin = min(m.min(), s.min())
+                        vmax = max(m.max(), s.max())
+                        
+                        # 히트맵 나란히 그리기
+                        fig, axes = plt.subplots(1, 2, figsize=(11, 12), tight_layout=True)
+                        im0 = axes[0].imshow(m, aspect='auto', vmin=vmin, vmax=vmax, interpolation='nearest')
+                        axes[0].set_title(f"{group} sample {i} – Dotproduct Sim")
+                        fig.colorbar(im0, ax=axes[0])
+                    
+                        im1 = axes[1].imshow(s, aspect='auto', vmin=vmin, vmax=vmax, interpolation='nearest')
+                        axes[1].set_title(f"{group} sample {i} – Scaled Sim")
+                        fig.colorbar(im1, ax=axes[1])
+                    
+                        # axis=1 방향 최대값 위치에 빨간 × 표시
+                        for ax, arr in zip(axes, (m, s)):
+                            row_max_cols = np.argmax(arr, axis=1)
+                            rows = np.arange(arr.shape[0])
+                            ax.scatter(row_max_cols, rows, marker='x', c='red', s=20)
+                            ax.set_xlabel("token index")
+                            ax.set_ylabel("patch index")
+                            
+                        #scale factor
+                        scale_not_dum = scale_factor[i, 0, 0]
+                        scale_dum = scale_factor[i, -1, 0]
+                    
+                        # 파일명에 샘플 인덱스 포함해서 저장
+                        save_path = os.path.join(group_folder, f"{group}sample_{i}.png")
+                        fig.text(0.9, 0.97, f"exis prob: {exis_prob_per_sample:.2f}\nSF : {scale_not_dum:.2f}| {scale_dum:.2f}\nall dummy extract?: {all_dummy_extract}")
+                        fig.savefig(save_path, dpi=130, bbox_inches='tight')
+                        plt.close(fig)
+            else:
+                dev = None
+            return losses_dict, predictions, dummy_dict, dev
         else:
-            dev = None
-        return losses_dict, predictions, dummy_dict, dev
+            return losses_dict, predictions
 
     def extract_visual_language(self, img, ref_expr_inds, text_attention_mask=None, sentence_token_flag=False):
         x, y, c= self.vis_enc(img, ref_expr_inds, text_attention_mask, sentence_token_flag=sentence_token_flag)
@@ -403,6 +410,10 @@ class MIXDETRMB(OneStageModel):
         # processed_results = []
         pred_bboxes = []
         #결과를 이미지별로 순회
+        if dummy_dict is None:
+            dummy_dict = {}
+            dummy_dict['dummy_idx'] = [torch.tensor(False) for _ in range(len(results))]
+            
         for results_per_image, img_meta, is_dummy in zip(results, img_metas, dummy_dict['dummy_idx']):
             image_size = img_meta["img_shape"]
             height = image_size[0]

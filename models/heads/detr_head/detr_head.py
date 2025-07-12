@@ -343,14 +343,15 @@ class DETRHead(nn.Module):
         outputs_coord = self.bbox_embed(hidden_states) #MLP(input_dim=embed_dim, hidden_dim=embed_dim, output_dim=4, num_layers=3) #outputs_coord: [num_decoder_layer, bs, num_query, 4]
 
         #더미토큰 처리
-        dummy_mask = dummy_idx.unsqueeze(0).unsqueeze(-1)
-        replacement_class = torch.tensor([-1000.0, 0.0], device=outputs_class.device)
-        replacement_box = torch.tensor([-1000.0, -1000.0, -1000.0, -1000.0], device=outputs_coord.device)
-
-        replacement_class = replacement_class.view(1, 1, 1, 2).expand_as(outputs_class)
-        replacement_box = replacement_box.view(1, 1, 1, 4).expand_as(outputs_coord)
-        outputs_class = torch.where(dummy_mask, replacement_class, outputs_class) #[num_decoder_layer, bs, num_query, 2]
-        outputs_coord = torch.where(dummy_mask, replacement_box, outputs_coord) #[num_decoder_layer, bs, num_query, 4]
+        if self.language_guided_query_selection_flag:
+            dummy_mask = dummy_idx.unsqueeze(0).unsqueeze(-1)
+            replacement_class = torch.tensor([-1000.0, 0.0], device=outputs_class.device)
+            replacement_box = torch.tensor([-1000.0, -1000.0, -1000.0, -1000.0], device=outputs_coord.device)
+    
+            replacement_class = replacement_class.view(1, 1, 1, 2).expand_as(outputs_class)
+            replacement_box = replacement_box.view(1, 1, 1, 4).expand_as(outputs_coord)
+            outputs_class = torch.where(dummy_mask, replacement_class, outputs_class) #[num_decoder_layer, bs, num_query, 2]
+            outputs_coord = torch.where(dummy_mask, replacement_box, outputs_coord) #[num_decoder_layer, bs, num_query, 4]
         
         # outputs_class[:, dummy_idx, :, :] = replacement_class.view(1, 1, 1, 2).expand(outputs_class.size(0), dummy_idx.sum(), self.num_queries, 2)
         # outputs_coord[:, dummy_idx, :, :] = replacement_box.view(1, 1, 1, 4).expand(outputs_coord.size(0), dummy_idx.sum(), self.num_queries, 4)
@@ -370,8 +371,12 @@ class DETRHead(nn.Module):
             if k in weight_dict:
                 loss_dict[k] *= weight_dict[k]
         loss_dict["loss_det"] = sum(loss_dict.values()) #최종 loss (giou + l1 + ce)
-        loss_dict['dummy_token_diversity_loss'] = loss_dummy_div
-        loss_dict['nt_dummy_loss'] = nt_dummy_loss
+        if self.language_guided_query_selection_flag:
+            loss_dict['dummy_token_diversity_loss'] = loss_dummy_div
+            loss_dict['nt_dummy_loss'] = nt_dummy_loss
+
+        else:
+            dummy_dict, similarity, scaled_similarity, scale_factor = None, None, None, None
         return loss_dict, output, dummy_dict, similarity, scaled_similarity, scale_factor
 
         # proj_queries = F.normalize(self.contrastive_align_projection_image(logits), p=2, dim=-1)
