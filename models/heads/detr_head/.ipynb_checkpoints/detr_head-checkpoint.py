@@ -313,23 +313,30 @@ class DETRHead(nn.Module):
             cos_sim_matrix = torch.matmul(normalized, normalized.T)  # [num_queries, num_queries]
             
             # Target similarity: identity = 1, else = -1
-            identity = torch.eye(self.num_queries, device=cos_sim_matrix.device)
-            target = (2.0 * identity) - 1.0  #대각: 1 / 비대각 : -1
+            # identity = torch.eye(self.num_queries, device=cos_sim_matrix.device)
+            # target = (2.0 * identity) - 1.0  #대각: 1 / 비대각 : -1
+            # Target similarity: identity = 1, else = 0
+            target = torch.eye(self.num_queries, device=cos_sim_matrix.device)
             
             # MSE loss between actual similarity and target (-1 off-diagonal, 1 diagonal)
             loss_dummy_div = F.mse_loss(cos_sim_matrix, target)
 
             #NT dummy loss
+            nan_mask = text_mask.bool().unsqueeze(1) #(bs, 1, max_seq_len)
+            expanded_mask = nan_mask.expand(-1, similarity.size(1), -1) 
+            masked_similarity = similarity.masked_fill(expanded_mask, 1)
+
             if no_target_mask.any():
-                nan_mask = text_mask.bool().unsqueeze(1) #(bs, 1, max_seq_len)
-                expanded_mask = nan_mask.expand(-1, similarity.size(1), -1) 
-                masked_similarity = similarity.masked_fill(expanded_mask, 1)
                 similarity_NT_dummy = masked_similarity[no_target_mask, -self.num_queries:, :]
                 nt_dummy_loss = F.mse_loss(similarity_NT_dummy, torch.ones_like(similarity_NT_dummy))
             else:
                 nt_dummy_loss = torch.tensor(0.0, device=similarity.device)
 
-
+            if (~no_target_mask).any():  # 모두 True가 아닌 경우만 처리
+                similarity_others_dummy = masked_similarity[~no_target_mask, :-self.num_queries, :] #수정 필요
+                others_dummy_loss = F.mse_loss(similarity_others_dummy, torch.zeros_like(similarity_others_dummy))
+            else:
+                others_dummy_loss = torch.tensor(0.0, device=similarity.device)
         else:
             query_embed = self.query_embed.weight
 
@@ -374,6 +381,7 @@ class DETRHead(nn.Module):
         if self.language_guided_query_selection_flag:
             loss_dict['dummy_token_diversity_loss'] = loss_dummy_div
             loss_dict['nt_dummy_loss'] = nt_dummy_loss
+            loss_dict['others_dummy_loss'] = others_dummy_loss
 
         else:
             dummy_dict, similarity, scaled_similarity, scale_factor = None, None, None, None
