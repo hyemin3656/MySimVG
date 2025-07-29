@@ -144,11 +144,11 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
             loss_exis_score_mean = torch.tensor([0.0], device=device)
 
         dummy_token_diversity_loss = losses_dict.pop("dummy_token_diversity_loss", torch.tensor([0.0], device=device))
-        nt_dummy_loss = losses_dict.pop("nt_dummy_loss", torch.tensor([0.0], device=device))
+        nt_dummy_loss = losses_dict.pop("nt_dummy_loss")#, torch.tensor([0.0], device=device))
         others_dummy_loss = losses_dict.pop("others_dummy_loss", torch.tensor([0.0], device=device))
         loss_det = losses_dict.get("loss_total", torch.tensor([0.0], device=device))+losses_dict.get("loss_det", torch.tensor([0.0], device=device))
         loss_mask = losses_dict.pop("loss_mask", torch.tensor([0.0], device=device))
-        loss = loss_det + loss_mask + loss_exis_score_mean + dummy_token_diversity_loss + nt_dummy_loss + others_dummy_loss
+        loss = loss_det + loss_mask + 5 * loss_exis_score_mean #+ dummy_token_diversity_loss + nt_dummy_loss + others_dummy_loss
         optimizer.zero_grad()
         if cfg.use_fp16:
             with apex.amp.scale_loss(loss, optimizer) as scaled_loss:
