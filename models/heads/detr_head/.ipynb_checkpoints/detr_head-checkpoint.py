@@ -333,7 +333,7 @@ class DETRHead(nn.Module):
                 nt_dummy_loss = torch.tensor(0.0, device=similarity.device)
                 
             if (~no_target_mask).any():  # 모두 True가 아닌 경우만 처리
-                similarity_others_dummy = masked_similarity[~no_target_mask, -self.num_queries:, :]
+                similarity_others_dummy = masked_similarity[~no_target_mask, :-self.num_queries, :] #구현 확인용(나중에 변경하기)
                 others_dummy_loss = F.mse_loss(similarity_others_dummy, torch.zeros_like(similarity_others_dummy))
             else:
                 others_dummy_loss = torch.tensor(0.0, device=similarity.device)
