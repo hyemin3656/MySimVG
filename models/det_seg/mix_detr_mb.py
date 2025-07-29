@@ -307,10 +307,9 @@ class MIXDETRMB(OneStageModel):
                         plt.close(fig)
             else:
                 dev = None
+            return losses_dict, predictions, dummy_dict, dev
         else:
-            dummy_dict = None
-            dev = None
-        return losses_dict, predictions, dummy_dict, dev
+            return losses_dict, predictions
 
     def extract_visual_language(self, img, ref_expr_inds, text_attention_mask=None, sentence_token_flag=False):
         x, y, c= self.vis_enc(img, ref_expr_inds, text_attention_mask, sentence_token_flag=sentence_token_flag)
