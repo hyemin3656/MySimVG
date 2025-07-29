@@ -293,7 +293,6 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
     )
     with torch.no_grad():
         total_loss= defaultdict(float)
-        total_loss_valid = defaultdict(float)
         total_sample = 0
         exis_total_loss = defaultdict(float)
         num_no_target_all = 0 #
@@ -317,7 +316,7 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
         }
         selected_keys = ['loss_class', 'loss_bbox', 'loss_giou', 'loss_det']
         exis_keys = ['loss_score_mean', 'no_target_los_mean', 'others_los_mean']
-        target_num_dict = defaultdict(int)
+        more_than_two_target = defaultdict(int)
         for batch, inputs in enumerate(loader):
             gt_bbox, gt_mask, is_crowd = None, None, None
             batch_sample = len(inputs["gt_bbox"].data[0])
@@ -330,11 +329,9 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                 else:
                     gt_bbox = copy.deepcopy(inputs["gt_bbox"].data[0])
                 for i in gt_bbox:
-                    if i.equal(torch.tensor([[0., 0., 0., 0.]], dtype=torch.float64)):
-                        shape_str = '0'
-                    else:
+                    if i.shape[0]>=3:
                         shape_str = f'{i.shape[0]}'
-                    target_num_dict[shape_str]+=1
+                        more_than_two_target[shape_str]+=1
                     
             if "gt_mask_rle" in inputs:
                 with_mask = True
@@ -358,8 +355,7 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
             inputs["epoch"]=epoch
             inputs["batch"] = batch
             inputs["batches"] = batches
-            #basline은 dummy_dict, dev가 None
-            losses_dict, valid_losses_dict, predictions, dummy_dict, dev = model( 
+            losses_dict, predictions, dummy_dict, dev = model( #basline은 dummy_dict, dev가 None
                 **inputs,
                 train_flag=False,
                 return_loss=True,
@@ -372,10 +368,6 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
             for key in selected_keys:
                 value = losses_dict[key]
                 total_loss[key] += value.item()
-                
-            for key in selected_keys:
-                value = valid_losses_dict[key]
-                total_loss_valid[key] += value.item()
                 
             batch_sample_size = [batch_sample, num_no_target, batch_sample-num_no_target]
             if "loss_exis_score" in losses_dict:
@@ -493,8 +485,6 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
             end = time.time()
         #전체 val detection loss
         avg_loss_dict = {k: v / batch for k, v in total_loss.items()}
-        #전체 val valid detection loss
-        avg_valid_loss_dict = {k: v / batch for k, v in total_loss_valid.items()}
         #전체 N-acc
         N_acc_all = nt_all["TP"] / (nt_all["TP"] + nt_all["FN"]) if nt_all["TP"] != 0 else torch.tensor(0.0, device=device)
         N_acc_all = N_acc_all.float() * 100
@@ -510,7 +500,6 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
             if train_loader is not None:
                 x_step = (epoch+1) * len(train_loader)
             writer.add_scalars(f"Loss/val", avg_loss_dict, x_step)
-            writer.add_scalars(f"Loss_valid/val", avg_valid_loss_dict, x_step)
             #val F1, N-acc, det_acc
             writer.add_scalars(f"f1", {"val_f1":F1_score_all.item()}, x_step)
             writer.add_scalars(f"N-acc", {"val_N-acc":N_acc_all.item()}, x_step)
@@ -525,8 +514,8 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                 #해당 배치의 diversity loss
                 writer.add_scalar(f"dummy_diversity_loss/val", dummy_token_diversity_loss, x_step)
                 #해당 배치의 dummy enhance loss
-                writer.add_scalar(f"dummy_enhance_loss/val/nt", nt_dummy_loss, x_step)
-                writer.add_scalar(f"dummy_enhance_loss/val/others", others_dummy_loss, x_step)
+                writer.add_scalar(f"nt_dummy_loss/val", nt_dummy_loss, x_step)
+                writer.add_scalar(f"dummy_enhance_loss/others_dummy_loss/val", others_dummy_loss, x_step)
 
                 print(f"val_f1: {F1_score_all.item()}, val_N-acc: {N_acc_all.item()}, val_det_acc: {det_acc_all.item()}")
 
@@ -559,7 +548,7 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                     'yes_dum_no_target_over_cross' : dummy_dict_all['ratio_over_cross_blah']/batches_for_check_over,
                     'yes_dum_no_target_under_cross' : dummy_dict_all['ratio_under_cross_blah']/batches_for_check_under
                 }, x_step)
-        print('target_num_dict', target_num_dict)
+        print('num_more_than_two_target', more_than_two_target)
                                    
     if not cfg["dataset"] == "GRefCOCO":
         det_acc = sum(list(det_acc_dict.values())) / len(det_acc_dict)

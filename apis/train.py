@@ -72,13 +72,12 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
         'ratio_under_cross_blah': torch.tensor(0.0, device=device)
     }
     total_loss= defaultdict(float)
-    total_loss_valid = defaultdict(float)
     exis_total_loss = defaultdict(float)
     num_no_target_all = 0 #
     total_sample = 0
     selected_keys = ['loss_class', 'loss_bbox', 'loss_giou', 'loss_det']
     exis_keys = ['loss_score_mean', 'no_target_los_mean', 'others_los_mean']
-    target_num_dict = defaultdict(int)
+    more_than_two_target = defaultdict(int)
     #torch.autograd.set_detect_anomaly(True)
     for batch, inputs in enumerate(loader):
         data_time = time.time() - end
@@ -92,11 +91,9 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
             else:
                 gt_bbox = copy.deepcopy(inputs["gt_bbox"].data[0])
             for i in gt_bbox:
-                if i.equal(torch.tensor([[0., 0., 0., 0.]], dtype=torch.float64)):
-                    shape_str = '0'
-                else:
+                if i.shape[0]>=3:
                     shape_str = f'{i.shape[0]}'
-                target_num_dict[shape_str]+=1
+                    more_than_two_target[shape_str]+=1
             
 
         img_metas = inputs["img_metas"].data[0]
@@ -119,17 +116,13 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
         inputs["batch"] = batch
         inputs["batches"] = batches
 
-        losses_dict, valid_losses_dict, predictions, dummy_dict, dev = model(**inputs, rescale=False) #LGQS = False 일 경우 dummy_dict, dev는 None
+        losses_dict, predictions, dummy_dict, dev = model(**inputs, rescale=False) #LGQS = False 일 경우 dummy_dict, dev는 None
 
         #loss 누적
         for key in selected_keys:
             value = losses_dict[key]
             total_loss[key] += value.item()
-            
-        for key in selected_keys:
-            value = valid_losses_dict[key]
-            total_loss_valid[key] += value.item()
-            
+
         batch_sample_size = [batch_sample, num_no_target, batch_sample-num_no_target]
         if "loss_exis_score" in losses_dict:
             exis_enc_flag = True
@@ -144,11 +137,11 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
             loss_exis_score_mean = torch.tensor([0.0], device=device)
 
         dummy_token_diversity_loss = losses_dict.pop("dummy_token_diversity_loss", torch.tensor([0.0], device=device))
-        nt_dummy_loss = losses_dict.pop("nt_dummy_loss")#, torch.tensor([0.0], device=device))
+        nt_dummy_loss = losses_dict.pop("nt_dummy_loss", torch.tensor([0.0], device=device))
         others_dummy_loss = losses_dict.pop("others_dummy_loss", torch.tensor([0.0], device=device))
         loss_det = losses_dict.get("loss_total", torch.tensor([0.0], device=device))+losses_dict.get("loss_det", torch.tensor([0.0], device=device))
         loss_mask = losses_dict.pop("loss_mask", torch.tensor([0.0], device=device))
-        loss = loss_det + loss_mask + 5 * loss_exis_score_mean #+ dummy_token_diversity_loss + nt_dummy_loss + others_dummy_loss
+        loss = loss_det + loss_mask + loss_exis_score_mean + dummy_token_diversity_loss #+ nt_dummy_loss + others_dummy_loss
         optimizer.zero_grad()
         if cfg.use_fp16:
             with apex.amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -288,14 +281,10 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                 
                 #전체 train detection loss
                 avg_loss_dict = {k: v / (batch+1) for k, v in total_loss.items()}
-                #전체 train valid detection loss
-                avg_valid_loss_dict = {k: v / (batch+1) for k, v in total_loss_valid.items()}
                 #Tensorboard
                 x_step = epoch*batches + batch + 1
                 #train loss
-                writer.add_scalars(f"Loss/train", avg_loss_dict, x_step)
-                #train valid loss
-                writer.add_scalars(f"Loss_valid/train", avg_valid_loss_dict, x_step)
+                writer.add_scalars(f"Loss/train", avg_loss_dict, x_step) 
                 #train F1, N-acc
                 if batch + 1 == batches:
                     #전체 N-acc
@@ -319,8 +308,8 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                         #해당 배치의 diversity loss
                         writer.add_scalar(f"dummy_diversity_loss/train", dummy_token_diversity_loss, x_step)
                         #해당 배치의 dummy enhance loss
-                        writer.add_scalar(f"dummy_enhance_loss/train/nt", nt_dummy_loss, x_step)
-                        writer.add_scalar(f"dummy_enhance_loss/train/others", others_dummy_loss, x_step)
+                        writer.add_scalar(f"dummy_enhance_loss/nt_dummy_loss/train", nt_dummy_loss, x_step)
+                        writer.add_scalar(f"dummy_enhance_loss/others_dummy_loss/train", others_dummy_loss, x_step)
                         #전체 Dummy precision
                         dummy_precision_all = dummy_dict_all['num_accurate_dummy']/dummy_dict_all['num_all_dummy']
                         writer.add_scalars(f"dummy_metric/train", {"dummy_precision":dummy_precision_all.item()}, x_step)
@@ -351,5 +340,5 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                         }, x_step)
 
                 
-                    print('target_num_dict', target_num_dict)
+                    print('num_more_than_two_target', more_than_two_target)
         end = time.time()
