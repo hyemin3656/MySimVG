@@ -172,7 +172,7 @@ class MIXDETRMB(OneStageModel):
         combined_mask = spec_token_mask | text_attention_mask
         
         #detr head
-        losses_dict, output, dummy_dict, similarity, scaled_similarity, scale_factor = self.head.forward_train(
+        losses_dict, valid_losses_dict, output, dummy_dict, similarity, scaled_similarity, scale_factor = self.head.forward_train(
             img_feat_trans, img_feat, img_metas, text_feat=text_feat, text_scores=exis_probs, text_mask=combined_mask, gt_bbox=gt_bbox, epoch=epoch #img_feat, img_metas, cls_feat=cls_feat, gt_bbox=gt_bbox, text_feat=text_feat, text_mask=text_attention_mask
         )
         #output_token_branch = output["token_branch_output"]
@@ -310,7 +310,7 @@ class MIXDETRMB(OneStageModel):
         else:
             dummy_dict = None
             dev = None
-        return losses_dict, predictions, dummy_dict, dev
+        return losses_dict, valid_losses_dict, predictions, dummy_dict, dev
 
     def extract_visual_language(self, img, ref_expr_inds, text_attention_mask=None, sentence_token_flag=False):
         x, y, c= self.vis_enc(img, ref_expr_inds, text_attention_mask, sentence_token_flag=sentence_token_flag)
