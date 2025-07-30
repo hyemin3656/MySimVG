@@ -503,9 +503,9 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                 x_step = (epoch+1) * len(train_loader)
             writer.add_scalars(f"Loss/val", avg_loss_dict, x_step)
             #val F1, N-acc, det_acc
-            writer.add_scalars(f"f1", {"val_f1":F1_score_all.item()}, x_step)
-            writer.add_scalars(f"N-acc", {"val_N-acc":N_acc_all.item()}, x_step)
-            writer.add_scalars(f"det_acc", {"val_det_acc":det_acc_all.item()}, x_step)
+            writer.add_scalars(f"metric/f1", {"val_f1":F1_score_all.item()}, x_step)
+            writer.add_scalars(f"metric/N-acc", {"val_N-acc":N_acc_all.item()}, x_step)
+            writer.add_scalars(f"metric/det_acc", {"val_det_acc":det_acc_all.item()}, x_step)
             
             #전체 exis loss
             if exis_enc_flag :
@@ -516,8 +516,8 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                 #해당 배치의 diversity loss
                 writer.add_scalar(f"dummy_diversity_loss/val", dummy_token_diversity_loss, x_step)
                 #해당 배치의 dummy enhance loss
-                writer.add_scalar(f"dummy_enhance_loss/nt_dummy_loss/val", nt_dummy_loss, x_step)
-                writer.add_scalar(f"dummy_enhance_loss/others_dummy_loss/val", others_dummy_loss, x_step)
+                writer.add_scalar(f"dummy_enhance_loss/val/nt", nt_dummy_loss, x_step)
+                writer.add_scalar(f"dummy_enhance_loss/val/others", others_dummy_loss, x_step)
 
                 print(f"val_f1: {F1_score_all.item()}, val_N-acc: {N_acc_all.item()}, val_det_acc: {det_acc_all.item()}")
 
@@ -535,7 +535,7 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                 #part dummy 수
                 writer.add_scalars(f"extract_part_dummy/num_sample/val", {"no-target": dummy_dict_all['sum_part_dummy_of_nt'].item(), "others":dummy_dict_all['sum_part_dummy_of_others'].item()}, x_step)
                 
-                print('dummy_precision_all', dummy_precision_all.item(), 'dummy_recall_all', dummy_recall_all.item(), 'dummy_f1_all', dummy_f1_all.item())
+                #print('dummy_precision_all', dummy_precision_all.item(), 'dummy_recall_all', dummy_recall_all.item(), 'dummy_f1_all', dummy_f1_all.item())
 
                 #dev
                 if dev is not None:
@@ -552,7 +552,6 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                     'yes_dum_no_target_over_cross' : dummy_dict_all['ratio_over_cross_blah']/batches_for_check_over,
                     'yes_dum_no_target_under_cross' : dummy_dict_all['ratio_under_cross_blah']/batches_for_check_under
                 }, x_step)
-        print('num_more_than_two_target', more_than_two_target)
                                    
     if not cfg["dataset"] == "GRefCOCO":
         det_acc = sum(list(det_acc_dict.values())) / len(det_acc_dict)

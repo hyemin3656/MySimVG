@@ -295,12 +295,12 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                     #전체 F1
                     F1_score_all = correct_image_all / num_image_all
                     F1_score_all = F1_score_all.float() * 100
-                    writer.add_scalars(f"f1", {"train_f1":F1_score_all.item()}, x_step)
-                    writer.add_scalars(f"N-acc", {"train_N-acc":N_acc_all.item()}, x_step)
+                    writer.add_scalars(f"metric/f1", {"train_f1":F1_score_all.item()}, x_step)
+                    writer.add_scalars(f"metric/N-acc", {"train_N-acc":N_acc_all.item()}, x_step)
                     #전체 det acc
                     det_acc_all = num_correct_ot_all/num_ot_all
                     det_acc_all = det_acc_all.float()*100
-                    writer.add_scalars(f"det_acc", {"train_det_acc":det_acc_all.item()}, x_step)
+                    writer.add_scalars(f"metric/det_acc", {"train_det_acc":det_acc_all.item()}, x_step)
                     if exis_enc_flag :
                         #전체 exis loss
                         sample_sizes = [total_sample, num_no_target_all, total_sample-num_no_target_all]
@@ -310,8 +310,8 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                         #해당 배치의 diversity loss
                         writer.add_scalar(f"dummy_diversity_loss/train", dummy_token_diversity_loss, x_step)
                         #해당 배치의 dummy enhance loss
-                        writer.add_scalar(f"dummy_enhance_loss/nt_dummy_loss/train", nt_dummy_loss, x_step)
-                        writer.add_scalar(f"dummy_enhance_loss/others_dummy_loss/train", others_dummy_loss, x_step)
+                        writer.add_scalar(f"dummy_enhance_loss/train/nt", nt_dummy_loss, x_step)
+                        writer.add_scalar(f"dummy_enhance_loss/train/others", others_dummy_loss, x_step)
                         #전체 Dummy precision
                         dummy_precision_all = dummy_dict_all['num_accurate_dummy']/dummy_dict_all['num_all_dummy']
                         writer.add_scalars(f"dummy_metric/train", {"dummy_precision":dummy_precision_all.item()}, x_step)
@@ -327,7 +327,7 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                         #part dummy 수
                         writer.add_scalars(f"extract_part_dummy/num_sample/train", {"no-target": dummy_dict_all['sum_part_dummy_of_nt'].item(), "others":dummy_dict_all['sum_part_dummy_of_others'].item()}, x_step)
                         
-                        print('dummy_precision_all', dummy_precision_all.item(), 'dummy_recall_all', dummy_recall_all.item(), 'dummy_f1_all', dummy_f1_all.item())
+                        #print('dummy_precision_all', dummy_precision_all.item(), 'dummy_recall_all', dummy_recall_all.item(), 'dummy_f1_all', dummy_f1_all.item())
                         #dev
                         if dev is not None:
                             writer.add_scalars(f"dev/train/no_target", {
@@ -345,5 +345,5 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                         }, x_step)
 
                 
-                    print('num_more_than_two_target', more_than_two_target)
+                    #print('num_more_than_two_target', more_than_two_target)
         end = time.time()
