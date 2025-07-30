@@ -259,18 +259,25 @@ class DETRHead(nn.Module):
                 for target in meta['target']:
                     if target['category_id']==-1:
                         no_target[i]=1
-            num_no_target = no_target.sum()
             num_accurate_dummy = (all_dummy_idx & (no_target == 1)).sum()
             #더미 비율
             no_target_mask = no_target.bool()
             if no_target_mask.any():
-                dummy_ratio_of_no_target = dummy_idx[no_target_mask, :].sum(dim=1) /self.num_queries #(num_no_target)
-                sum_dummy_ratio_of_no_target = dummy_ratio_of_no_target.sum()
+                dummy_num_of_nt = dummy_idx[no_target_mask, :].sum(dim=1) #(num_nt)
+                part_dummy_of_nt = (dummy_num_of_nt < self.num_queries) & (dummy_num_of_nt > 0)
+                dummy_ratio_of_part_dum_nt = dummy_num_of_nt[part_dummy_of_nt]/self.num_queries #(num_part_dum_nt)
+                
+                #dummy_ratio_of_no_target = dummy_idx[no_target_mask, :].sum(dim=1) /self.num_queries #(num_no_target)
+                sum_dummy_ratio_of_part_dum_nt = dummy_ratio_of_part_dum_nt.sum()
+                sum_part_dummy_of_nt = part_dummy_of_nt.sum()
             else:
-                sum_dummy_ratio_of_no_target = None
+                sum_dummy_ratio_of_part_dum_nt = None
+                sum_part_dummy_of_nt = None
+
+            dummy_num_of_others = dummy_idx[~no_target_mask, :].sum(dim=1) #(num_others)
+            part_dummy_of_others = (dummy_num_of_others < self.num_queries) & (dummy_num_of_others > 0)
             
-            dummy_ratio_of_others = dummy_idx[~no_target_mask, :].sum(dim=1) /self.num_queries #(num_others)
-            sum_dummy_ratio_of_others = dummy_ratio_of_others.sum()
+            dummy_ratio_of_part_dum_others = dummy_num_of_others[part_dummy_of_others]/self.num_queries #(num_part_dum_others) 
 
             #scale factor 0.7기준 양상
             is_over_cross = text_scores[:, 0]>=0.7 #(bs)
@@ -290,7 +297,7 @@ class DETRHead(nn.Module):
                 ratio_under_cross = None
 
             
-            dummy_dict = {'num_all_dummy': num_all_dummy, 'num_no_target' : num_no_target, 'num_accurate_dummy': num_accurate_dummy, 'dummy_idx': dummy_idx, 'sum_dummy_ratio_of_no_target' : sum_dummy_ratio_of_no_target, 'sum_dummy_ratio_of_others' : sum_dummy_ratio_of_others, 'ratio_over_cross_blah': ratio_over_cross, 'ratio_under_cross_blah' : ratio_under_cross}
+            dummy_dict = {'num_all_dummy': num_all_dummy, 'num_accurate_dummy': num_accurate_dummy, 'dummy_idx': dummy_idx, 'sum_dummy_ratio_of_part_dum_nt' : sum_dummy_ratio_of_part_dum_nt, 'sum_part_dummy_of_nt':sum_part_dummy_of_nt, 'sum_dummy_ratio_of_part_dum_others' : dummy_ratio_of_part_dum_others.sum(), 'sum_part_dummy_of_others': part_dummy_of_others.sum(), 'ratio_over_cross_blah': ratio_over_cross, 'ratio_under_cross_blah' : ratio_under_cross}
             
             # h_idx = top1_idx // W
             # w_idx = top1_idx % W

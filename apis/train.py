@@ -66,8 +66,10 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
     dummy_dict_all = {
         'num_all_dummy': torch.tensor(0.0, device=device),
         'num_accurate_dummy': torch.tensor(0.0, device=device),
-        'sum_dummy_ratio_of_no_target': torch.tensor(0.0, device=device),
-        'sum_dummy_ratio_of_others': torch.tensor(0.0, device=device),
+        'sum_dummy_ratio_of_part_dum_nt': torch.tensor(0.0, device=device),
+        'sum_part_dummy_of_nt': torch.tensor(0.0, device=device),
+        'sum_dummy_ratio_of_part_dum_others': torch.tensor(0.0, device=device),
+        'sum_part_dummy_of_others': torch.tensor(0.0, device=device),
         'ratio_over_cross_blah': torch.tensor(0.0, device=device),
         'ratio_under_cross_blah': torch.tensor(0.0, device=device)
     }
@@ -319,10 +321,13 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                         dummy_f1_all = 2*(dummy_precision_all*dummy_recall_all)/(dummy_precision_all+dummy_recall_all)
                         writer.add_scalars(f"dummy_metric/train", {"dummy_f1":dummy_f1_all.item()}, x_step)
                         writer.add_scalars(f"dummy_ratio/train", {"dummy_num/total_size":dummy_dict_all['num_all_dummy'].item()/sample_sizes[0]}, x_step)
-                        #전체 dummy ratio
-                        writer.add_scalars(f"extract_dummy_ratio/train", {"no-target":dummy_dict_all['sum_dummy_ratio_of_no_target'].item()/sample_sizes[1], "others":dummy_dict_all['sum_dummy_ratio_of_others'].item()/sample_sizes[2]}, x_step)
-                        print('dummy_num', dummy_dict_all['num_all_dummy'].item(), 'dummy_precision_all', dummy_precision_all.item(), 'dummy_recall_all',
-                            dummy_recall_all.item(), 'dummy_f1_all', dummy_f1_all.item())
+                        
+                        #part dummy ratio
+                        writer.add_scalars(f"extract_part_dummy/ratio/train", {"no-target":dummy_dict_all['sum_dummy_ratio_of_part_dum_nt'].item()/dummy_dict_all['sum_part_dummy_of_nt'].item(), "others":dummy_dict_all['sum_dummy_ratio_of_part_dum_others'].item()/dummy_dict_all['sum_part_dummy_of_others'].item()}, x_step)
+                        #part dummy 수
+                        writer.add_scalars(f"extract_part_dummy/num_sample/train", {"no-target": dummy_dict_all['sum_part_dummy_of_nt'].item(), "others":dummy_dict_all['sum_part_dummy_of_others'].item()}, x_step)
+                        
+                        print('dummy_precision_all', dummy_precision_all.item(), 'dummy_recall_all', dummy_recall_all.item(), 'dummy_f1_all', dummy_f1_all.item())
                         #dev
                         if dev is not None:
                             writer.add_scalars(f"dev/train/no_target", {
