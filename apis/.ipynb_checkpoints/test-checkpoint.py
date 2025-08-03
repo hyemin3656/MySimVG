@@ -1,6 +1,7 @@
 import time
 import torch
 import numpy
+import numpy as np
 import copy
 
 import pycocotools.mask as maskUtils
@@ -187,6 +188,10 @@ def grec_evaluate_f1_nacc_detacc(predictions, gt_bboxes, targets, thresh_score=0
     one_target_mask = torch.ones(len(predictions), dtype=torch.bool, device=device)
     top_1_boxes = []
     num_nt = 0
+    #confidence 체크
+    filtered_conf_nt = []
+    filtered_conf_ot = []
+    filtered_conf_mt = []
     for i, (prediction, gt_bbox, target) in enumerate(zip(predictions, gt_bboxes, targets)): #각 샘플마다 순회
         TP = 0
         assert prediction is not None
@@ -223,6 +228,15 @@ def grec_evaluate_f1_nacc_detacc(predictions, gt_bboxes, targets, thresh_score=0
         # filtered_boxes = sorted_boxes[0:1]
         giou = generalized_box_iou(filtered_boxes, gt_bbox_all.view(-1, 4)) #(num_prediction, num_gt)
         num_prediction = filtered_boxes.shape[0] #score기준 필터링한 후 남은 예측 박스(쿼리) 수
+        #confidence check
+        if no_target_flag == True:
+            filtered_conf_nt.append(num_prediction)
+        elif one_target_mask[i] == True:
+            filtered_conf_ot.append(num_prediction)
+        else:
+            filtered_conf_mt.append(num_prediction)
+
+        
         num_gt = gt_bbox_all.shape[0] # 1 or 2
         if no_target_flag:
             if num_prediction >= 1: #1개 이상이라도 object class 예측확률이 0.7 이상인 쿼리가 있는 경우
@@ -257,6 +271,21 @@ def grec_evaluate_f1_nacc_detacc(predictions, gt_bboxes, targets, thresh_score=0
             correct_image += 1
         num_image += 1
 
+    #confidence check
+    def print_conf_stats(conf_list, name):
+        if len(conf_list) > 0:
+            mean = np.mean(conf_list)
+            var = np.var(conf_list)
+            print(conf_list)
+            print(f"{name} - 평균: {mean:.2f}, 분산: {var:.2f}")
+        else:
+            print(f"{name} - 데이터가 없음")
+
+    #print_conf_stats(filtered_conf_nt, "No Target (filtered_conf_nt)")
+    #print_conf_stats(filtered_conf_ot, "One Target (filtered_conf_ot)")
+    #print_conf_stats(filtered_conf_mt, "Multiple Targets (filtered_conf_mt)")
+    #print('-----------------')
+    
     batch_F1_score = correct_image / num_image #F1 score가 1인 이미지들의 비율
     # T_acc = nt["TN"] / (nt["TN"] + nt["FP"])
     batch_N_acc = nt["TP"] / (nt["TP"] + nt["FN"]) if nt["TP"] != 0 else torch.tensor(0.0, device=device)
@@ -530,8 +559,12 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                 dummy_f1_all = 2*(dummy_precision_all*dummy_recall_all)/(dummy_precision_all+dummy_recall_all)
                 writer.add_scalars(f"dummy_metric/val", {"dummy_f1":dummy_f1_all.item()}, x_step)
                 writer.add_scalars(f"dummy_ratio/val", {"dummy_num/total_size":dummy_dict_all['num_all_dummy'].item()/sample_sizes[0]}, x_step)
-                #전체 dummy ratio
-                writer.add_scalars(f"extract_part_dummy/ratio/val", {"no-target":dummy_dict_all['sum_dummy_ratio_of_part_dum_nt'].item()/dummy_dict_all['sum_part_dummy_of_nt'].item(), "others":dummy_dict_all['sum_dummy_ratio_of_part_dum_others'].item()/dummy_dict_all['sum_part_dummy_of_others'].item()}, x_step)
+                nt_denom = dummy_dict_all['sum_part_dummy_of_nt'].item()
+                others_denom = dummy_dict_all['sum_part_dummy_of_others'].item()
+
+                if nt_denom > 1e-6 and others_denom > 1e-6:
+                    #전체 dummy ratio
+                    writer.add_scalars(f"extract_part_dummy/ratio/val", {"no-target":dummy_dict_all['sum_dummy_ratio_of_part_dum_nt'].item()/nt_denom, "others":dummy_dict_all['sum_dummy_ratio_of_part_dum_others'].item()/others_denom}, x_step)
                 #part dummy 수
                 writer.add_scalars(f"extract_part_dummy/num_sample/val", {"no-target": dummy_dict_all['sum_part_dummy_of_nt'].item(), "others":dummy_dict_all['sum_part_dummy_of_others'].item()}, x_step)
                 

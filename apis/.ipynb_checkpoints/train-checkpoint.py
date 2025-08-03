@@ -80,6 +80,7 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
     selected_keys = ['loss_class', 'loss_bbox', 'loss_giou', 'loss_det']
     exis_keys = ['loss_score_mean', 'no_target_los_mean', 'others_los_mean']
     more_than_two_target = defaultdict(int)
+    num_not_valid_loss = torch.tensor(0.0, device=device)
     #torch.autograd.set_detect_anomaly(True)
     for batch, inputs in enumerate(loader):
         data_time = time.time() - end
@@ -122,8 +123,12 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
 
         #loss 누적
         for key in selected_keys:
-            value = losses_dict[key]
-            total_loss[key] += value.item()
+            if key in losses_dict:
+                value = losses_dict[key]
+                total_loss[key] += value.item()
+            else:
+                if key == 'loss_det':
+                    num_not_valid_loss +=1
 
         batch_sample_size = [batch_sample, num_no_target, batch_sample-num_no_target]
         if "loss_exis_score" in losses_dict:
@@ -280,13 +285,13 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                     + ACC_str
                     #+ f"num_acc_dummy: {dummy_dict['num_accurate_dummy'].item()}"
                 )
-                
-                #전체 train detection loss
-                avg_loss_dict = {k: v / (batch+1) for k, v in total_loss.items()}
                 #Tensorboard
                 x_step = epoch*batches + batch + 1
-                #train loss
-                writer.add_scalars(f"Loss/train", avg_loss_dict, x_step) 
+                #전체 train detection loss
+                if ((batch+1)-num_not_valid_loss) !=0:
+                    avg_loss_dict = {k: v / ((batch+1)-num_not_valid_loss) for k, v in total_loss.items()}
+                    #train loss
+                    writer.add_scalars(f"Loss/train", avg_loss_dict, x_step) 
                 #train F1, N-acc
                 if batch + 1 == batches:
                     #전체 N-acc
@@ -322,8 +327,12 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                         writer.add_scalars(f"dummy_metric/train", {"dummy_f1":dummy_f1_all.item()}, x_step)
                         writer.add_scalars(f"dummy_ratio/train", {"dummy_num/total_size":dummy_dict_all['num_all_dummy'].item()/sample_sizes[0]}, x_step)
                         
-                        #part dummy ratio
-                        writer.add_scalars(f"extract_part_dummy/ratio/train", {"no-target":dummy_dict_all['sum_dummy_ratio_of_part_dum_nt'].item()/dummy_dict_all['sum_part_dummy_of_nt'].item(), "others":dummy_dict_all['sum_dummy_ratio_of_part_dum_others'].item()/dummy_dict_all['sum_part_dummy_of_others'].item()}, x_step)
+                        nt_denom = dummy_dict_all['sum_part_dummy_of_nt'].item()
+                        others_denom = dummy_dict_all['sum_part_dummy_of_others'].item()
+
+                        if nt_denom > 1e-6 and others_denom > 1e-6:
+                            #part dummy ratio
+                            writer.add_scalars(f"extract_part_dummy/ratio/train", {"no-target":dummy_dict_all['sum_dummy_ratio_of_part_dum_nt'].item()/nt_denom, "others":dummy_dict_all['sum_dummy_ratio_of_part_dum_others'].item()/others_denom}, x_step)
                         #part dummy 수
                         writer.add_scalars(f"extract_part_dummy/num_sample/train", {"no-target": dummy_dict_all['sum_part_dummy_of_nt'].item(), "others":dummy_dict_all['sum_part_dummy_of_others'].item()}, x_step)
                         

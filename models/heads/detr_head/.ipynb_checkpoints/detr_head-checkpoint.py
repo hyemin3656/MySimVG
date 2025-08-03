@@ -13,6 +13,7 @@ from detectron2.structures import Boxes, ImageList, Instances
 
 from .transformer import DetrTransformer, DetrTransformerEncoder, DetrTransformerDecoder
 from simvg.models import HEADS
+from collections import defaultdict
 
 #Token branch 사용 X
 @HEADS.register_module()
@@ -244,8 +245,7 @@ class DETRHead(nn.Module):
             query_embed, topk_patch_idx, similarity, scaled_similarity, scale_factor = self.language_guided_query_selection(text_feat, img_feat, text_scores, text_mask, epoch=epoch)
             
             #a, b = self.language_guided_query_selection_pre(text_feat, img_feat, text_scores, text_mask)
-            #더미토큰 처리
-            
+            #statistic
             B, C, H, W = pos_embed.shape
             n_patch = img_feat.size(1)
             dummy_idx = topk_patch_idx >= n_patch  #(bs, num_queries)
@@ -325,7 +325,7 @@ class DETRHead(nn.Module):
             # Target similarity: identity = 1, else = 0
             target = torch.eye(self.num_queries, device=cos_sim_matrix.device)
             
-            # MSE loss between actual similarity and target (-1 off-diagonal, 1 diagonal)
+            # MSE loss between actual similarity and target (0 off-diagonal, 1 diagonal)
             loss_dummy_div = F.mse_loss(cos_sim_matrix, target)
 
             #NT dummy loss
@@ -344,28 +344,56 @@ class DETRHead(nn.Module):
                 others_dummy_loss = F.mse_loss(similarity_others_dummy, torch.zeros_like(similarity_others_dummy))
             else:
                 others_dummy_loss = torch.tensor(0.0, device=similarity.device)
+            not_all_dummy_mask = ~all_dummy_idx
+            valid_x_mm = x_mm[not_all_dummy_mask]
+            valid_img_masks = img_masks[not_all_dummy_mask]
+            valid_query_embed = query_embed[not_all_dummy_mask]
+            valid_pos_embed = pos_embed[not_all_dummy_mask]
+            
+            
         else:
             query_embed = self.query_embed.weight
 
         #num_layers 개의 디코더 레이어 통과 (한 레이어 : "self_attn" -> "norm" -> "cross_attn"  -> "norm" -> "ffn" -> "norm")
         #self_attn : Q, K, V = content_query(zeros), Q_pos, K_pos = nn.Embedding
         #cross_attn : Q = content_query(zeros), K, V = x_mm, Q_pos = nn.Embedding, K_pos = pos_embed
-        hidden_states, _ = self.transformer(x_mm, img_masks, query_embed, pos_embed) #DetrTransformer #hidden_states: [num_decoder_layer, bs, num_query, embed_dim]
+        if not_all_dummy_mask.any():
+            hidden_states, _ = self.transformer(valid_x_mm, valid_img_masks, valid_query_embed, valid_pos_embed)
+            #HEAD쿼리 & 배치 전체에 대해 동일한 head를 적용
+            valid_outputs_class = self.class_embed(hidden_states) #nn.Linear(embed_dim, num_classes + 1) #outputs_class: [num_decoder_layer, bs, num_query, 2]
+            valid_outputs_coord = self.bbox_embed(hidden_states) #MLP(input_dim=embed_dim, hidden_dim=embed_dim, output_dim=4, num_layers=3) #outputs_coord: [num_decoder_layer, bs, num_query, 4]
 
-        #HEAD쿼리 & 배치 전체에 대해 동일한 head를 적용
-        outputs_class = self.class_embed(hidden_states) #nn.Linear(embed_dim, num_classes + 1) #outputs_class: [num_decoder_layer, bs, num_query, 2]
-        outputs_coord = self.bbox_embed(hidden_states) #MLP(input_dim=embed_dim, hidden_dim=embed_dim, output_dim=4, num_layers=3) #outputs_coord: [num_decoder_layer, bs, num_query, 4]
+        #hidden_states, _ = self.transformer(x_mm, img_masks, query_embed, pos_embed) #DetrTransformer #hidden_states: [num_decoder_layer, bs, num_query, embed_dim]
+
 
         #더미토큰 처리
         if self.language_guided_query_selection_flag:
-            dummy_mask = dummy_idx.unsqueeze(0).unsqueeze(-1)
-            replacement_class = torch.tensor([-1000.0, 0.0], device=outputs_class.device)
-            replacement_box = torch.tensor([-1000.0, -1000.0, -1000.0, -1000.0], device=outputs_coord.device)
+            #dummy_mask = dummy_idx.unsqueeze(0).unsqueeze(-1)
+            bs = all_dummy_idx.shape[0]
+            
+            replacement_class = torch.tensor([-1000.0, 0.0], device=all_dummy_idx.device)
+            replacement_box = torch.tensor([-1000.0, -1000.0, -1000.0, -1000.0], device=all_dummy_idx.device)
+            
+            replacement_class = replacement_class.view(1, 1, 1, 2).expand(3, num_all_dummy, self.num_queries, 2)
+            replacement_box = replacement_box.view(1, 1, 1, 4).expand(3, num_all_dummy, self.num_queries, 4)
+
+            outputs_class = torch.empty(3, bs, self.num_queries, 2, device=all_dummy_idx.device)
+            outputs_coord = torch.empty(3, bs, self.num_queries, 4, device=all_dummy_idx.device)
+
+            # 4. scatter
+            #print(outputs_class)
+            if not_all_dummy_mask.any():
+                outputs_class[:, not_all_dummy_mask] = valid_outputs_class
+                outputs_coord[:, not_all_dummy_mask] = valid_outputs_coord
+            
+            outputs_class[:, all_dummy_idx] = replacement_class
+            outputs_coord[:, all_dummy_idx] = replacement_box
+            
     
-            replacement_class = replacement_class.view(1, 1, 1, 2).expand_as(outputs_class)
-            replacement_box = replacement_box.view(1, 1, 1, 4).expand_as(outputs_coord)
-            outputs_class = torch.where(dummy_mask, replacement_class, outputs_class) #[num_decoder_layer, bs, num_query, 2]
-            outputs_coord = torch.where(dummy_mask, replacement_box, outputs_coord) #[num_decoder_layer, bs, num_query, 4]
+            # replacement_class = replacement_class.view(1, 1, 1, 2).expand_as(outputs_class)
+            # replacement_box = replacement_box.view(1, 1, 1, 4).expand_as(outputs_coord)
+            # outputs_class = torch.where(dummy_mask, replacement_class, outputs_class) #[num_decoder_layer, bs, num_query, 2]
+            # outputs_coord = torch.where(dummy_mask, replacement_box, outputs_coord) #[num_decoder_layer, bs, num_query, 4]
         
         # outputs_class[:, dummy_idx, :, :] = replacement_class.view(1, 1, 1, 2).expand(outputs_class.size(0), dummy_idx.sum(), self.num_queries, 2)
         # outputs_coord[:, dummy_idx, :, :] = replacement_box.view(1, 1, 1, 4).expand(outputs_coord.size(0), dummy_idx.sum(), self.num_queries, 4)
@@ -377,14 +405,25 @@ class DETRHead(nn.Module):
         output = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord[-1]} #pred_logits: [bs, num_query, 2], pred_boxes: [bs, num_query, 4]
         if self.aux_loss:
             output["aux_outputs"] = self._set_aux_loss(outputs_class, outputs_coord)
+            
+        if not_all_dummy_mask.any():
+        #valid_output
+            valid_outputs_coord = valid_outputs_coord.sigmoid()
+            valid_output = {"pred_logits": valid_outputs_class[-1], "pred_boxes": valid_outputs_coord[-1]} #pred_logits: [bs, num_query, 2], pred_boxes: [bs, num_query, 4]
+            if self.aux_loss:
+                valid_output["aux_outputs"] = self._set_aux_loss(valid_outputs_class, valid_outputs_coord)
 
-        targets = self.prepare_targets(gt_bbox, img_metas) #gt logit, gt 좌표 준비 {"labels": [1], "boxes": [1, n, 4]}의 리스트
-        loss_dict = self.criterion(output, targets) #{"loss_class": loss_class, "loss_giou" : loss_giou, "loss_bbox": loss_bbox}
-        weight_dict = self.criterion.weight_dict
-        for k in loss_dict.keys():
-            if k in weight_dict:
-                loss_dict[k] *= weight_dict[k]
-        loss_dict["loss_det"] = sum(loss_dict.values()) #최종 loss (giou + l1 + ce)
+            targets = self.prepare_targets(gt_bbox, img_metas) #gt logit, gt 좌표 준비 {"labels": [1], "boxes": [1, n, 4]}의 리스트
+            valid_targets = [x for x, m in zip(targets, not_all_dummy_mask) if m]
+            loss_dict = self.criterion(valid_output, valid_targets) #{"loss_class": loss_class, "loss_giou" : loss_giou, "loss_bbox": loss_bbox}
+            weight_dict = self.criterion.weight_dict
+            for k in loss_dict.keys():
+                if k in weight_dict:
+                    loss_dict[k] *= weight_dict[k]
+            loss_dict["loss_det"] = sum(loss_dict.values()) #최종 loss (giou + l1 + ce)
+        else:
+            loss_dict = defaultdict(float)
+            
         if self.language_guided_query_selection_flag:
             loss_dict['dummy_token_diversity_loss'] = loss_dummy_div
             loss_dict['nt_dummy_loss'] = nt_dummy_loss
