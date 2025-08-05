@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import os
 
 
-class ExisEcoderLayer(nn.Module):
+class ExisEncoderLayer(nn.Module):
     def __init__(self, embed_dim, self_attn=True, ffn=True):
         super().__init__()
         self.embed_dim = embed_dim #768
@@ -71,7 +71,7 @@ class ExisEcoderLayer(nn.Module):
             #Q : txt_feature
             #K, V : img_feature
             #attn_mask : (batch_size*num_heads, target seq len, source seq len)
-            key_padding_mask = text_mask.bool()
+            key_padding_mask = text_mask.bool()  #(bs, max_seq_len+1)
             #key_padding_mask = key_padding_mask.masked_fill(key_padding_mask.to(torch.bool), -1e8)
             mask_q = text_mask.unsqueeze(1).unsqueeze(-1) # (batch_size, max_seq_len) -> (batch_size, 1, max_seq_len, 1)
             #--------------self-att, Add&Norm----------------#
@@ -82,8 +82,8 @@ class ExisEcoderLayer(nn.Module):
                 # self_attention_mask = self_attention_mask.masked_fill(self_attention_mask.to(torch.bool), -1e8)
                 
                 residual = txt_feature
-                x = self.self_attn_layer_norm(txt_feature)
-                x = x * (1 - text_mask.unsqueeze(-1).type_as(x)) #패딩된부분 무시
+                x = self.self_attn_layer_norm(txt_feature) #(bs, max_seq_len+1, embed_dim)
+                x = x * (1 - text_mask.unsqueeze(-1).type_as(x)) #패딩된부분 무시 #(bs, max_seq_len+1, 1)
                 x, attn_map = self.self_attn( 
                     query=x,
                     key=x,
@@ -144,22 +144,22 @@ class ExisEcoder(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.sentence_token_flag = sentence_token_flag
-        self.encoder_layers = 1 #추후 변경
+        self.num_encoder_layers = 3 #추후 변경
             
         #레이어 정의
         self.layers = nn.ModuleList([])
-        for i in range(self.encoder_layers):
+        for i in range(self.num_encoder_layers):
             self.layers.append(
                 self.build_encoder_layer(embed_dim)
             )
-
-        self.lp =  nn.Linear(embed_dim*2, 1)
         if sentence_token_flag==True:
-        #sentence level token
+            #sentence level token
             self.sentence_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        else:
+            self.lp = nn.Linear(embed_dim*2, 1)
 
     def build_encoder_layer(self, embed_dim):
-        layer = ExisEcoderLayer(embed_dim)
+        layer = ExisEncoderLayer(embed_dim)
         return layer
     
     def forward(self, img_feature, txt_feature, text_mask=None, img_metas=None):
@@ -184,10 +184,10 @@ class ExisEcoder(nn.Module):
             sentence_token = self.sentence_token.expand(
                 x.size(0), -1, -1
             ) 
-            x = torch.cat((x, sentence_token), dim=1)
+            x = torch.cat((x, sentence_token), dim=1) #(bs, max_seq_len+1, embed_dim)
             #mask
-            sen_token_padding_mask = torch.zeros(x.size(0), 1, dtype=x.dtype, device=x.device)
-            text_mask = torch.cat([text_mask, sen_token_padding_mask], dim=1)
+            sen_token_padding_mask = torch.zeros((x.size(0), 1), dtype=x.dtype, device=x.device)
+            text_mask = torch.cat([text_mask, sen_token_padding_mask], dim=1) #(bs, max_seq_len+1)
         
         for idx, layer in enumerate(self.layers):
             x = layer(
@@ -203,7 +203,6 @@ class ExisEcoder(nn.Module):
         #x:(bs, max_seq_len, embed_dim)
         #text_mask:(bs, max_seq_len)
 
-            concat
             muti_feature = torch.cat((txt_feature, x), dim =-1) #(bs, max_seq_len, embed_dim*2)
             #LP
             exis_scores = self.lp(muti_feature) #(bs, max_seq_len, 1)

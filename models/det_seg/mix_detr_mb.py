@@ -85,7 +85,9 @@ class MIXDETRMB(OneStageModel):
         #print('ref_expr_inds', ref_expr_inds)
 
         img_feat, text_feat, cls_feat = self.extract_visual_language(img, ref_expr_inds, text_attention_mask, sentence_token_flag=self.beit_sentence_token_flag)
-
+        
+        img_feat_trans = img_feat.transpose(-1, -2).reshape(B, -1, H // self.patch_size, W // self.patch_size)
+        
         if self.beit_sentence_token_flag==True or self.exis_encoder_flag==True:
             if self.beit_sentence_token_flag==True:
                 text_feat, sent_feat = text_feat[:, :-1, :], text_feat[:, -1, :]
@@ -162,8 +164,6 @@ class MIXDETRMB(OneStageModel):
         #text_feat:(bs, max_seq_len, embed_dim)
         #cls_feat : (bs, embed_dim)
         #text_attention_mask:(bs, max_seq_len)
-        
-        img_feat_trans = img_feat.transpose(-1, -2).reshape(B, -1, H // self.patch_size, W // self.patch_size)
 
         #text_attention_mask[:, 0], text_attention_mask[:, -1] = 1, 1
         

@@ -331,16 +331,17 @@ class DETRHead(nn.Module):
             #NT dummy loss
             nan_mask = text_mask.bool().unsqueeze(1) #(bs, 1, max_seq_len)
             expanded_mask = nan_mask.expand(-1, similarity.size(1), -1) 
-            masked_similarity = similarity.masked_fill(expanded_mask, 1)
 
             if no_target_mask.any():
-                similarity_NT_dummy = masked_similarity[no_target_mask, -self.num_queries:, :]
+                masked_similarity_nt = similarity.masked_fill(expanded_mask, 1)
+                similarity_NT_dummy = masked_similarity_nt[no_target_mask, -self.num_queries:, :]
                 nt_dummy_loss = F.mse_loss(similarity_NT_dummy, torch.ones_like(similarity_NT_dummy))
             else:
                 nt_dummy_loss = torch.tensor(0.0, device=similarity.device)
 
             if (~no_target_mask).any():  # 모두 True가 아닌 경우만 처리
-                similarity_others_dummy = masked_similarity[~no_target_mask, -self.num_queries:, :] #수정 필요
+                masked_similarity_ot = similarity.masked_fill(expanded_mask, 0)
+                similarity_others_dummy = masked_similarity_ot[~no_target_mask, -self.num_queries:, :] #수정 필요
                 others_dummy_loss = F.mse_loss(similarity_others_dummy, torch.zeros_like(similarity_others_dummy))
             else:
                 others_dummy_loss = torch.tensor(0.0, device=similarity.device)
@@ -360,8 +361,8 @@ class DETRHead(nn.Module):
         if not_all_dummy_mask.any():
             hidden_states, _ = self.transformer(valid_x_mm, valid_img_masks, valid_query_embed, valid_pos_embed)
             #HEAD쿼리 & 배치 전체에 대해 동일한 head를 적용
-            valid_outputs_class = self.class_embed(hidden_states) #nn.Linear(embed_dim, num_classes + 1) #outputs_class: [num_decoder_layer, bs, num_query, 2]
-            valid_outputs_coord = self.bbox_embed(hidden_states) #MLP(input_dim=embed_dim, hidden_dim=embed_dim, output_dim=4, num_layers=3) #outputs_coord: [num_decoder_layer, bs, num_query, 4]
+            valid_outputs_class = self.class_embed(hidden_states) #nn.Linear(embed_dim, num_classes + 1) #outputs_class: [num_decoder_layer, num_valid, num_query, 2]
+            valid_outputs_coord = self.bbox_embed(hidden_states) #MLP(input_dim=embed_dim, hidden_dim=embed_dim, output_dim=4, num_layers=3) #outputs_coord: [num_decoder_layer, num_valid, num_query, 4]
 
         #hidden_states, _ = self.transformer(x_mm, img_masks, query_embed, pos_embed) #DetrTransformer #hidden_states: [num_decoder_layer, bs, num_query, embed_dim]
 
@@ -377,8 +378,8 @@ class DETRHead(nn.Module):
             replacement_class = replacement_class.view(1, 1, 1, 2).expand(3, num_all_dummy, self.num_queries, 2)
             replacement_box = replacement_box.view(1, 1, 1, 4).expand(3, num_all_dummy, self.num_queries, 4)
 
-            outputs_class = torch.empty(3, bs, self.num_queries, 2, device=all_dummy_idx.device)
-            outputs_coord = torch.empty(3, bs, self.num_queries, 4, device=all_dummy_idx.device)
+            outputs_class = torch.empty((3, bs, self.num_queries, 2), device=all_dummy_idx.device)
+            outputs_coord = torch.empty((3, bs, self.num_queries, 4), device=all_dummy_idx.device)
 
             # 4. scatter
             #print(outputs_class)
@@ -407,7 +408,7 @@ class DETRHead(nn.Module):
             output["aux_outputs"] = self._set_aux_loss(outputs_class, outputs_coord)
             
         if not_all_dummy_mask.any():
-        #valid_output
+            #valid_output
             valid_outputs_coord = valid_outputs_coord.sigmoid()
             valid_output = {"pred_logits": valid_outputs_class[-1], "pred_boxes": valid_outputs_coord[-1]} #pred_logits: [bs, num_query, 2], pred_boxes: [bs, num_query, 4]
             if self.aux_loss:
