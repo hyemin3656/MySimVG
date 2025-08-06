@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import os
-
+from detrex.layers.position_embedding import PositionEmbeddingLearned, PositionEmbeddingSine
 
 class ExisEncoderLayer(nn.Module):
     def __init__(self, embed_dim, self_attn=True, ffn=True):
@@ -65,104 +65,142 @@ class ExisEncoderLayer(nn.Module):
     
     def residual_connection(self, x, residual):
         return residual + x # * self.alpha
-    
-    def forward(self, img_feature, txt_feature, text_mask=None):
-            #attention
-            #Q : txt_feature
-            #K, V : img_feature
-            #attn_mask : (batch_size*num_heads, target seq len, source seq len)
-            key_padding_mask = text_mask.bool()  #(bs, max_seq_len+1)
-            #key_padding_mask = key_padding_mask.masked_fill(key_padding_mask.to(torch.bool), -1e8)
-            mask_q = text_mask.unsqueeze(1).unsqueeze(-1) # (batch_size, max_seq_len) -> (batch_size, 1, max_seq_len, 1)
-            #--------------self-att, Add&Norm----------------#
-            if self.self_attn_flag == True:
-                # mask_k = text_mask.unsqueeze(1).unsqueeze(2) # (batch_size, 1, 1, max_seq_len)
-                # self_attention_mask = mask_q | mask_k  # (batch_size, 1, max_seq_len, max_seq_len) # 둘 중 하나라도 padding이면 mask
-                # self_attention_mask = self_attention_mask.expand(-1, self.num_heads, -1, -1).flatten(0, 1).bool() # (batch_size*num_heads, seq_len, seq_len)
-                # self_attention_mask = self_attention_mask.masked_fill(self_attention_mask.to(torch.bool), -1e8)
-                
-                residual = txt_feature
-                x = self.self_attn_layer_norm(txt_feature) #(bs, max_seq_len+1, embed_dim)
-                x = x * (1 - text_mask.unsqueeze(-1).type_as(x)) #패딩된부분 무시 #(bs, max_seq_len+1, 1)
-                x, attn_map = self.self_attn( 
-                    query=x,
-                    key=x,
-                    value=x,
-                    key_padding_mask=key_padding_mask,
-                    attn_mask= None
-                )
-                x = self.dropout_module(x)
-                
-                x = self.residual_connection(x, residual)
-                residual = x
-                x = self.cross_attn_layer_norm(x)
-            else:
-                residual = txt_feature
-                x = self.cross_attn_layer_norm(txt_feature)
-                
-            #--------------cross-att, Add&Norm---------------#
-            # cross_attention_mask = mask_q.repeat(1, self.num_heads, 1, img_feature.shape[-2])
-            # cross_attention_mask = cross_attention_mask.flatten(0, 1).bool()
-            # cross_attention_mask = cross_attention_mask.masked_fill(cross_attention_mask.to(torch.bool), -1e8)
-    
-            # if self.normalize_before:
-            #     x = self.self_attn_layer_norm(x)
-            x = x * (1 - text_mask.unsqueeze(-1).type_as(x)) #패딩된부분 무시
-            x, attn_map = self.cross_attn( 
-                query=x,
-                key=img_feature,
-                value=img_feature,
-                attn_mask=None 
+
+    def forward(self, img_feature, txt_feature, img_pos_embed, txt_pos_embed, text_mask=None, img_masks=None):
+        key_padding_mask = text_mask.bool()  #(bs, seq_len)
+        key_padding_mask_img = img_masks.bool()  #(bs, h*w)
+        non_pad_mask = (1 - text_mask.unsqueeze(-1).type_as(txt_feature))  # (bs, seq_len, 1)
+
+        x = txt_feature  # (bs, seq_len, embed_dim)
+
+        #-------------- Self-Attention ----------------#
+        if self.self_attn_flag:
+            residual = x
+
+            # Positional embedding: query, key에만 더함
+            q = k = x + txt_pos_embed
+            v = x  # value에는 pos embed를 더하지 않음
+
+            q = q * non_pad_mask
+            k = k * non_pad_mask
+            v = v * non_pad_mask
+
+            self_attn_out, self_attn_map = self.self_attn(
+                query=q,
+                key=k,
+                value=v,
+                key_padding_mask=key_padding_mask,
+                attn_mask=None
             )
-            x = self.dropout_module(x)
 
-            # if self.drop_path is not None:
-            #     x = self.drop_path(x) #Residual Connection을 랜덤하게 비활성화
+            self_attn_out = self.dropout_module(self_attn_out)
+            x = residual + self_attn_out  # Add
+            x = self.self_attn_layer_norm(x)  # Norm
 
-            x = self.residual_connection(x, residual)
-            # if not self.normalize_before: 
-            #     x = self.self_attn_layer_norm(x) #self-att 이후에 LayerNorm
+        #-------------- Cross-Attention ----------------#
+        residual = x
 
-            if self.ffn_flag == True:
-                residual = x
-                x = self.ffn_layer_norm(x)
-                #--------------FFN---------------#
-                # if self.normalize_before:
-                #     x = self.final_layer_norm(x)
-                x = self.ffn(x) 
-    
-                # if self.drop_path is not None:
-                #     x = self.drop_path(x)
+        # Positional embedding 다시 더함 (query = text, key = image)
+        q = x + txt_pos_embed
+        k = img_feature + img_pos_embed
+        v = img_feature  # value는 pos 안 더함
 
-                x = self.residual_connection(x, residual)
-                # if not self.normalize_before:
-                #     x = self.final_layer_norm(x)
-            return x
+        q = q * non_pad_mask  # query 마스킹
+
+        cross_attn_out, cross_attn_map = self.cross_attn(
+            query=q,
+            key=k,
+            value=v,
+            key_padding_mask=key_padding_mask_img,
+            attn_mask=None
+        )
+
+        cross_attn_out = self.dropout_module(cross_attn_out)
+        x = residual + cross_attn_out  # Add
+        x = self.cross_attn_layer_norm(x)  # Norm
+
+        #-------------- FFN ----------------#
+        if self.ffn_flag:
+            residual = x
+            ffn_out = self.ffn(x)
+            ffn_out = self.dropout_module(ffn_out)
+            x = residual + ffn_out  # Add
+            x = self.ffn_layer_norm(x)  # Norm
+
+        return x
     
 class ExisEcoder(nn.Module):
-    def __init__(self, embed_dim, sentence_token_flag):
+    def __init__(self, in_channels, sentence_token_flag):
         super().__init__()
-        self.embed_dim = embed_dim
+        self.in_channels = in_channels
         self.sentence_token_flag = sentence_token_flag
         self.num_encoder_layers = 3 #추후 변경
-            
+        self.embed_dim = 256
+        self.img_proj = nn.Conv2d(in_channels, self.embed_dim, kernel_size=1) #image feature projection
+        self.txt_proj = nn.Linear(in_channels, self.embed_dim) #text feature projection
+
+        self.position_embedding = PositionEmbeddingSine(
+        num_pos_feats=self.embed_dim // 2,
+        temperature=10000,
+        normalize=True,
+    )
+
         #레이어 정의
         self.layers = nn.ModuleList([])
         for i in range(self.num_encoder_layers):
             self.layers.append(
-                self.build_encoder_layer(embed_dim)
+                self.build_encoder_layer(self.embed_dim)
             )
         if sentence_token_flag==True:
             #sentence level token
-            self.sentence_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+            self.sentence_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
+            #sentence token position embedding
+            self.sent_token_pos_embedding = nn.Parameter(torch.randn(1, self.embed_dim))
+
         else:
-            self.lp = nn.Linear(embed_dim*2, 1)
+            self.lp = nn.Linear(self.embed_dim*2, 1)
 
     def build_encoder_layer(self, embed_dim):
         layer = ExisEncoderLayer(embed_dim)
         return layer
     
-    def forward(self, img_feature, txt_feature, text_mask=None, img_metas=None):
+    def x_mask_pos_enc(self, x, img_metas):
+        batch_size = x.size(0)
+        input_img_h, input_img_w = img_metas[0]["batch_input_shape"]
+        x_mask = x.new_ones((batch_size, input_img_h, input_img_w))
+        # CAUTION: do not support random flipping
+        for img_id in range(batch_size):
+            img_h, img_w, _ = img_metas[img_id]["img_shape"]
+            x_mask[img_id, :img_h, :img_w] = 0
+
+        x_mask = F.interpolate(x_mask.unsqueeze(1), size=x.size()[-2:]).to(torch.bool).squeeze(1)
+
+        x_pos_embeds = self.position_embedding(x_mask)
+
+        # x_mask = x_mask.view(batch_size, -1)
+        # x_pos_embeds = x_pos_embeds.view(
+        #     batch_size, self.d_model, -1).transpose(1, 2)
+
+        return x_mask, x_pos_embeds
+    
+    def sinusoidal_positional_embedding(self, token_sequence_size, token_embedding_dim, n=10000.0):
+
+        if token_embedding_dim % 2 != 0:
+            raise ValueError("Sinusoidal positional embedding cannot apply to odd token embedding dim (got dim={:d})".format(token_embedding_dim))
+
+        T = token_sequence_size
+        d = token_embedding_dim #d_model=head_num*d_k, not d_q, d_k, d_v
+
+        positions = torch.arange(0, T).unsqueeze_(1)
+        embeddings = torch.zeros(T, d)
+
+        denominators = torch.pow(n, 2*torch.arange(0, d//2)/d) # 10000^(2i/d_model), i is the index of embedding
+        embeddings[:, 0::2] = torch.sin(positions/denominators) # sin(pos/10000^(2i/d_model))
+        embeddings[:, 1::2] = torch.cos(positions/denominators) # cos(pos/10000^(2i/d_model))
+
+        return embeddings
+    
+    def forward(self, x_mm, txt_feature, text_mask=None, img_metas=None):
         # def debug_tensor(name, tensor, verbose=True):
         #     has_nan = torch.isnan(tensor).any().item()
         #     has_inf = torch.isinf(tensor).any().item()
@@ -179,6 +217,19 @@ class ExisEcoder(nn.Module):
         #         return True
         #     return False
         
+        #input projection
+        x_mm = self.img_proj(x_mm)
+        txt_feature = self.txt_proj(txt_feature)
+        #position embedding
+        img_masks, img_pos_embed = self.x_mask_pos_enc(x_mm, img_metas)
+        txt_pos_embed = self.sinusoidal_positional_embedding(txt_feature.shape[1], self.embed_dim).to(txt_feature.device)  # [max_seq_len, embed_dim]
+        #reshape
+        bs, c, h, w = x_mm.shape
+        x_mm = x_mm.view(bs, c, -1).permute(0, 2, 1)  # [bs, h*w, c]
+        img_pos_embed = img_pos_embed.view(bs, c, -1).permute(0, 2, 1)  # [bs, h*w, c]
+        txt_pos_embed = txt_pos_embed.unsqueeze(0).repeat(bs, 1, 1)
+        img_masks = img_masks.view(bs, -1)  # [bs, h, w] -> [bs, h*w]
+
         x = txt_feature
         if self.sentence_token_flag==True:
             sentence_token = self.sentence_token.expand(
@@ -188,12 +239,19 @@ class ExisEcoder(nn.Module):
             #mask
             sen_token_padding_mask = torch.zeros((x.size(0), 1), dtype=x.dtype, device=x.device)
             text_mask = torch.cat([text_mask, sen_token_padding_mask], dim=1) #(bs, max_seq_len+1)
+            #pos embedding
+            sent_token_pos_embedding = self.sent_token_pos_embedding.unsqueeze(0).repeat(bs, 1, 1)
+            txt_pos_embed = torch.cat([txt_pos_embed, sent_token_pos_embedding], dim=1)
+
         
         for idx, layer in enumerate(self.layers):
             x = layer(
-                img_feature,
+                x_mm,
                 x,
-                text_mask
+                img_pos_embed,
+                txt_pos_embed,
+                text_mask,
+                img_masks
             )
 
         if self.sentence_token_flag==True:
