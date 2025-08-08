@@ -229,12 +229,12 @@ def grec_evaluate_f1_nacc_detacc(predictions, gt_bboxes, targets, thresh_score=0
         giou = generalized_box_iou(filtered_boxes, gt_bbox_all.view(-1, 4)) #(num_prediction, num_gt)
         num_prediction = filtered_boxes.shape[0] #score기준 필터링한 후 남은 예측 박스(쿼리) 수
         #confidence check
-        if no_target_flag == True:
-            filtered_conf_nt.append(num_prediction)
-        elif one_target_mask[i] == True:
-            filtered_conf_ot.append(num_prediction)
-        else:
-            filtered_conf_mt.append(num_prediction)
+        # if no_target_flag == True:
+        #     filtered_conf_nt.append(num_prediction)
+        # elif one_target_mask[i] == True:
+        #     filtered_conf_ot.append(num_prediction)
+        # else:
+        #     filtered_conf_mt.append(num_prediction)
 
         
         num_gt = gt_bbox_all.shape[0] # 1 or 2

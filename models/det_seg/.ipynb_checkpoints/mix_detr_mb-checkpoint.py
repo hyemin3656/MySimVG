@@ -27,7 +27,7 @@ class MIXDETRMB(OneStageModel):
         self.exis_enc_sentence_token_flag=True #True
         self.exis_encoder_flag=True #True
         
-        self.exis_proj = nn.Linear(256, 1) 
+        self.exis_proj = nn.Linear(768, 1) 
         self.now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self.dev = {'no_target': {'dotpro': 0, 'scaled': 0 }, 'others': {'dotpro': 0, 'scaled': 0 }}
 
@@ -41,8 +41,8 @@ class MIXDETRMB(OneStageModel):
                 args = _get_large_config()
             else:
                 raise TypeError("please select the <vit_type> from ['base','large']")
-            embed_dim = args.encoder_embed_dim
-            self.exisenc = ExisEcoder(embed_dim, self.exis_enc_sentence_token_flag)
+            in_channels = args.encoder_embed_dim
+            self.exisenc = ExisEcoder(in_channels, self.exis_enc_sentence_token_flag)
 
     def forward_train(
         self,
@@ -92,7 +92,7 @@ class MIXDETRMB(OneStageModel):
             if self.beit_sentence_token_flag==True:
                 text_feat, sent_feat = text_feat[:, :-1, :], text_feat[:, -1, :]
             else:
-                sent_feat = self.exisenc(img_feat_trans, text_feat, text_mask=text_attention_mask, img_metas=img_metas) #(bs, embed_dim)
+                sent_feat = self.exisenc(img_feat, text_feat, text_mask=text_attention_mask, img_metas=img_metas) #(bs, embed_dim)
             
             #FC -> exis score
             exis_scores = self.exis_proj(sent_feat) #(bs, 1)

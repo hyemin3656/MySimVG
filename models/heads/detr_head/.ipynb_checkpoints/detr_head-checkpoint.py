@@ -54,6 +54,7 @@ class DETRHead(nn.Module):
             ),
             only_decoder=only_decoder,
         )
+        self.num_decoder_layers = num_decoder_layers
         self.input_proj = nn.Conv2d(in_channels, embed_dim, kernel_size=1) #image feature projection
         self.query_embed = nn.Embedding(num_queries, embed_dim) #lgqs X 시 쿼리 초기화
         self.num_classes = num_classes
@@ -145,7 +146,7 @@ class DETRHead(nn.Module):
     def language_guided_query_selection(self, text_feat, img_feat, text_scores, text_mask, epoch=None):
         #text_scores : (bs, 1)
         nan_mask = text_mask.bool().unsqueeze(1) #(bs, 1, max_seq_len)
-        dummy_token_expanded = self.dummy_token.unsqueeze(0).expand(img_feat.size(0), -1, -1)
+        dummy_token_expanded = self.dummy_token.unsqueeze(0).expand(img_feat.size(0), -1, -1) #(bs, num_queries, embed_dim)
         # if epoch>=10:
         #     img_feat_with_dummy = torch.cat([img_feat, dummy_token_expanded], dim=1) #(bs, num_patches + num_query, embed_dim)
         # else:
@@ -242,16 +243,16 @@ class DETRHead(nn.Module):
         img_masks, pos_embed = self.x_mask_pos_enc(x_mm, img_metas)  # TODO: fix the img mask #padding 전처리 들어갈 경우 필요
         
         if self.language_guided_query_selection_flag:
+            #similarit - not masked / scaled_similarity - masked
             query_embed, topk_patch_idx, similarity, scaled_similarity, scale_factor = self.language_guided_query_selection(text_feat, img_feat, text_scores, text_mask, epoch=epoch)
             
-            #a, b = self.language_guided_query_selection_pre(text_feat, img_feat, text_scores, text_mask)
             #statistic
             B, C, H, W = pos_embed.shape
             n_patch = img_feat.size(1)
             dummy_idx = topk_patch_idx >= n_patch  #(bs, num_queries)
             all_dummy_idx = dummy_idx.all(dim=1) #(bs) #num_queries개수만큼 더미가 모두 뽑혔을 때 dummy_idx는 True
 
-            #더미 뽑힌 횟수
+            #모든 쿼리에서 더미가 뽑힌 횟수
             num_all_dummy = all_dummy_idx.sum()
             #No-target일때 더미 뽑힌 횟수
             no_target = torch.tensor([0]*B, device=all_dummy_idx.device)
@@ -319,37 +320,35 @@ class DETRHead(nn.Module):
             # Cosine similarity matrix
             cos_sim_matrix = torch.matmul(normalized, normalized.T)  # [num_queries, num_queries]
             
-            # Target similarity: identity = 1, else = -1
-            # identity = torch.eye(self.num_queries, device=cos_sim_matrix.device)
-            # target = (2.0 * identity) - 1.0  #대각: 1 / 비대각 : -1
             # Target similarity: identity = 1, else = 0
             target = torch.eye(self.num_queries, device=cos_sim_matrix.device)
             
             # MSE loss between actual similarity and target (0 off-diagonal, 1 diagonal)
             loss_dummy_div = F.mse_loss(cos_sim_matrix, target)
 
-            #NT dummy loss
             nan_mask = text_mask.bool().unsqueeze(1) #(bs, 1, max_seq_len)
             expanded_mask = nan_mask.expand(-1, similarity.size(1), -1) 
-
+            #NT dummy loss
             if no_target_mask.any():
                 masked_similarity_nt = similarity.masked_fill(expanded_mask, 1)
                 similarity_NT_dummy = masked_similarity_nt[no_target_mask, -self.num_queries:, :]
                 nt_dummy_loss = F.mse_loss(similarity_NT_dummy, torch.ones_like(similarity_NT_dummy))
             else:
                 nt_dummy_loss = torch.tensor(0.0, device=similarity.device)
-
+            #others dummy loss
             if (~no_target_mask).any():  # 모두 True가 아닌 경우만 처리
                 masked_similarity_ot = similarity.masked_fill(expanded_mask, 0)
-                similarity_others_dummy = masked_similarity_ot[~no_target_mask, -self.num_queries:, :] #수정 필요
+                similarity_others_dummy = masked_similarity_ot[~no_target_mask, -self.num_queries:, :] 
                 others_dummy_loss = F.mse_loss(similarity_others_dummy, torch.zeros_like(similarity_others_dummy))
             else:
                 others_dummy_loss = torch.tensor(0.0, device=similarity.device)
             not_all_dummy_mask = ~all_dummy_idx
+            #all dummy인 샘플들은 제외
             valid_x_mm = x_mm[not_all_dummy_mask]
             valid_img_masks = img_masks[not_all_dummy_mask]
-            valid_query_embed = query_embed[not_all_dummy_mask]
+            valid_query_embed = query_embed[not_all_dummy_mask] #(valid_sample, num_queries, embed_dim)
             valid_pos_embed = pos_embed[not_all_dummy_mask]
+            valid_dummy_mask = dummy_idx[not_all_dummy_mask]
             
             
         else:
@@ -359,27 +358,34 @@ class DETRHead(nn.Module):
         #self_attn : Q, K, V = content_query(zeros), Q_pos, K_pos = nn.Embedding
         #cross_attn : Q = content_query(zeros), K, V = x_mm, Q_pos = nn.Embedding, K_pos = pos_embed
         if not_all_dummy_mask.any():
-            hidden_states, _ = self.transformer(valid_x_mm, valid_img_masks, valid_query_embed, valid_pos_embed)
+            hidden_states, _ = self.transformer(valid_x_mm, valid_img_masks, valid_query_embed, valid_pos_embed, valid_dummy_mask) #[num_decoder_layer, bs, num_query, embed_dim] 
             #HEAD쿼리 & 배치 전체에 대해 동일한 head를 적용
             valid_outputs_class = self.class_embed(hidden_states) #nn.Linear(embed_dim, num_classes + 1) #outputs_class: [num_decoder_layer, num_valid, num_query, 2]
             valid_outputs_coord = self.bbox_embed(hidden_states) #MLP(input_dim=embed_dim, hidden_dim=embed_dim, output_dim=4, num_layers=3) #outputs_coord: [num_decoder_layer, num_valid, num_query, 4]
 
         #hidden_states, _ = self.transformer(x_mm, img_masks, query_embed, pos_embed) #DetrTransformer #hidden_states: [num_decoder_layer, bs, num_query, embed_dim]
+            
+        replacement_class = torch.tensor([-1000.0, 0.0], device=all_dummy_idx.device)
+        replacement_box = torch.tensor([-1000.0, -1000.0, -1000.0, -1000.0], device=all_dummy_idx.device)
+        if not_all_dummy_mask.any():
+            #part dummy prediction 처리
+            mask = valid_dummy_mask.unsqueeze(0).unsqueeze(-1)  # shape: [1, N_valid, Q, 1] 
+            replacement_class = replacement_class.view(1, 1, 1, -1) #[1, 1, 1, 2]
+            replacement_box = replacement_box.view(1, 1, 1, -1) #[1, 1, 1, 4]
+  
+            valid_outputs_class = torch.where(mask, replacement_class, valid_outputs_class) #모두 [N_decoder, N_valid, Q, 2]로 broadcasting
+            valid_outputs_coord = torch.where(mask, replacement_box, valid_outputs_coord)
 
-
-        #더미토큰 처리
+        #all dummy prediction 처리
         if self.language_guided_query_selection_flag:
             #dummy_mask = dummy_idx.unsqueeze(0).unsqueeze(-1)
             bs = all_dummy_idx.shape[0]
             
-            replacement_class = torch.tensor([-1000.0, 0.0], device=all_dummy_idx.device)
-            replacement_box = torch.tensor([-1000.0, -1000.0, -1000.0, -1000.0], device=all_dummy_idx.device)
-            
-            replacement_class = replacement_class.view(1, 1, 1, 2).expand(3, num_all_dummy, self.num_queries, 2)
-            replacement_box = replacement_box.view(1, 1, 1, 4).expand(3, num_all_dummy, self.num_queries, 4)
+            replacement_class = replacement_class.view(1, 1, 1, 2).expand(self.num_decoder_layers, num_all_dummy, self.num_queries, self.num_classes+1)
+            replacement_box = replacement_box.view(1, 1, 1, 4).expand(self.num_decoder_layers, num_all_dummy, self.num_queries, 4)
 
-            outputs_class = torch.empty((3, bs, self.num_queries, 2), device=all_dummy_idx.device)
-            outputs_coord = torch.empty((3, bs, self.num_queries, 4), device=all_dummy_idx.device)
+            outputs_class = torch.empty((self.num_decoder_layers, bs, self.num_queries, self.num_classes+1), device=all_dummy_idx.device)
+            outputs_coord = torch.empty((self.num_decoder_layers, bs, self.num_queries, 4), device=all_dummy_idx.device)
 
             # 4. scatter
             #print(outputs_class)
@@ -408,7 +414,7 @@ class DETRHead(nn.Module):
             output["aux_outputs"] = self._set_aux_loss(outputs_class, outputs_coord)
             
         if not_all_dummy_mask.any():
-            #valid_output
+            #valid_output중 not dummy 쿼리에 대해서만 Hungarian, Loss
             valid_outputs_coord = valid_outputs_coord.sigmoid()
             valid_output = {"pred_logits": valid_outputs_class[-1], "pred_boxes": valid_outputs_coord[-1]} #pred_logits: [bs, num_query, 2], pred_boxes: [bs, num_query, 4]
             if self.aux_loss:
@@ -416,7 +422,7 @@ class DETRHead(nn.Module):
 
             targets = self.prepare_targets(gt_bbox, img_metas) #gt logit, gt 좌표 준비 {"labels": [1], "boxes": [1, n, 4]}의 리스트
             valid_targets = [x for x, m in zip(targets, not_all_dummy_mask) if m]
-            loss_dict = self.criterion(valid_output, valid_targets) #{"loss_class": loss_class, "loss_giou" : loss_giou, "loss_bbox": loss_bbox}
+            loss_dict = self.criterion(valid_output, valid_targets, valid_dummy_mask) #{"loss_class": loss_class, "loss_giou" : loss_giou, "loss_bbox": loss_bbox}
             weight_dict = self.criterion.weight_dict
             for k in loss_dict.keys():
                 if k in weight_dict:

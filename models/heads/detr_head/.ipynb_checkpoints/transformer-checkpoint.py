@@ -104,7 +104,7 @@ class DetrTransformerDecoder(TransformerLayerSequence):
         batch_first: bool = False,
     ):
         super(DetrTransformerDecoder, self).__init__(
-            transformer_layers=BaseTransformerLayer(
+            transformer_layers=BaseTransformerLayer( #BaseTrasnsformerLayer를 num_layer만큼 쌓아서 self.layers에 저장
                 attn=MultiheadAttention(
                     embed_dim=embed_dim,
                     num_heads=num_heads,
@@ -202,7 +202,7 @@ class DetrTransformer(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def forward(self, x, mask, query_embed, pos_embed):
+    def forward(self, x, mask, query_embed, pos_embed, dummy_mask):
         #query_embed : (bs, embed_dim')
         bs, c, h, w = x.shape
         x = x.view(bs, c, -1).permute(2, 0, 1)  # [bs, c, h, w] -> [h*w, bs, c]
@@ -229,6 +229,7 @@ class DetrTransformer(nn.Module):
             value=memory,
             key_pos=pos_embed,
             query_pos=query_embed,
+            query_key_padding_mask=dummy_mask,
             key_padding_mask=mask,
         )
         decoder_output = decoder_output.transpose(1, 2)

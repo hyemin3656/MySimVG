@@ -16,7 +16,7 @@ class ExisEncoderLayer(nn.Module):
         self.self_attn_flag = self_attn
         if self_attn == True:
             self.self_attn = self.build_self_attention(self.embed_dim, self.num_heads)
-            self.self_attn_layer_norm = LayerNorm(self.embed_dim)
+            self.self_attn_layer_norm = LayerNorm(self.embed_dim) #feature축에서만 정규화
         self.cross_attn = self.build_cross_attention(self.embed_dim, self.num_heads)
         self.cross_attn_layer_norm = LayerNorm(self.embed_dim)
 
@@ -66,49 +66,43 @@ class ExisEncoderLayer(nn.Module):
     def residual_connection(self, x, residual):
         return residual + x # * self.alpha
 
-    def forward(self, img_feature, txt_feature, img_pos_embed, txt_pos_embed, text_mask=None, img_masks=None):
-        key_padding_mask = text_mask.bool()  #(bs, seq_len)
-        key_padding_mask_img = img_masks.bool()  #(bs, h*w)
-        non_pad_mask = (1 - text_mask.unsqueeze(-1).type_as(txt_feature))  # (bs, seq_len, 1)
+    def forward(self, img_feature, txt_feature, text_mask, img_pos_embed=None, img_masks=None):
+        key_padding_mask = text_mask.bool()  #(bs, max_seq_len+1)
+        if img_masks:
+            key_padding_mask_img = img_masks.bool()  #(bs, h*w)
+        else:
+            key_padding_mask_img=None
 
-        x = txt_feature  # (bs, seq_len, embed_dim)
+        x = txt_feature  # (bs, max_seq_len+1, embed_dim) #(pos_embed, 적용됨)
 
         #-------------- Self-Attention ----------------#
         if self.self_attn_flag:
             residual = x
 
-            # Positional embedding: query, key에만 더함
-            q = k = x + txt_pos_embed
-            v = x  # value에는 pos embed를 더하지 않음
-
-            q = q * non_pad_mask
-            k = k * non_pad_mask
-            v = v * non_pad_mask
-
             self_attn_out, self_attn_map = self.self_attn(
-                query=q,
-                key=k,
-                value=v,
+                query=x,
+                key=x,
+                value=x,
                 key_padding_mask=key_padding_mask,
                 attn_mask=None
             )
 
             self_attn_out = self.dropout_module(self_attn_out)
-            x = residual + self_attn_out  # Add
+            x = self.residual_connection(self_attn_out, residual)  # Add
             x = self.self_attn_layer_norm(x)  # Norm
 
         #-------------- Cross-Attention ----------------#
         residual = x
 
-        # Positional embedding 다시 더함 (query = text, key = image)
-        q = x + txt_pos_embed
-        k = img_feature + img_pos_embed
+        #query = text, key = image
+        if img_pos_embed:
+            k = img_feature + img_pos_embed
+        else:
+            k = img_feature
         v = img_feature  # value는 pos 안 더함
 
-        q = q * non_pad_mask  # query 마스킹
-
         cross_attn_out, cross_attn_map = self.cross_attn(
-            query=q,
+            query=x,
             key=k,
             value=v,
             key_padding_mask=key_padding_mask_img,
@@ -116,7 +110,7 @@ class ExisEncoderLayer(nn.Module):
         )
 
         cross_attn_out = self.dropout_module(cross_attn_out)
-        x = residual + cross_attn_out  # Add
+        x = self.residual_connection(cross_attn_out, residual)  # Add
         x = self.cross_attn_layer_norm(x)  # Norm
 
         #-------------- FFN ----------------#
@@ -124,9 +118,8 @@ class ExisEncoderLayer(nn.Module):
             residual = x
             ffn_out = self.ffn(x)
             ffn_out = self.dropout_module(ffn_out)
-            x = residual + ffn_out  # Add
+            x = self.residual_connection(ffn_out, residual)  # Add
             x = self.ffn_layer_norm(x)  # Norm
-
         return x
     
 class ExisEcoder(nn.Module):
@@ -134,16 +127,25 @@ class ExisEcoder(nn.Module):
         super().__init__()
         self.in_channels = in_channels
         self.sentence_token_flag = sentence_token_flag
+        #--------------hyperparam-------------#
         self.num_encoder_layers = 3 #추후 변경
-        self.embed_dim = 256
-        self.img_proj = nn.Conv2d(in_channels, self.embed_dim, kernel_size=1) #image feature projection
-        self.txt_proj = nn.Linear(in_channels, self.embed_dim) #text feature projection
-
-        self.position_embedding = PositionEmbeddingSine(
-        num_pos_feats=self.embed_dim // 2,
-        temperature=10000,
-        normalize=True,
-    )
+        self.embed_dim = 768
+        self.projection = False
+        self.pos_enc = False
+        if self.projection:
+            if self.pos_enc:
+                self.img_proj = nn.Conv2d(in_channels, self.embed_dim, kernel_size=1) #image feature projection
+            else:
+                self.img_proj = nn.Linear(in_channels, self.embed_dim)
+            self.txt_proj = nn.Linear(in_channels, self.embed_dim) #text feature projection
+        else:
+            self.embed_dim = in_channels
+        if self.pos_enc:
+            self.position_embedding = PositionEmbeddingSine(
+            num_pos_feats=self.embed_dim // 2,
+            temperature=10000,
+            normalize=True,
+        )
 
         #레이어 정의
         self.layers = nn.ModuleList([])
@@ -155,7 +157,8 @@ class ExisEcoder(nn.Module):
             #sentence level token
             self.sentence_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
             #sentence token position embedding
-            self.sent_token_pos_embedding = nn.Parameter(torch.randn(1, self.embed_dim))
+            if self.pos_enc:
+                self.sent_token_pos_embedding = nn.Parameter(torch.randn(1, self.embed_dim))
 
         else:
             self.lp = nn.Linear(self.embed_dim*2, 1)
@@ -218,17 +221,23 @@ class ExisEcoder(nn.Module):
         #     return False
         
         #input projection
-        x_mm = self.img_proj(x_mm)
-        txt_feature = self.txt_proj(txt_feature)
-        #position embedding
-        img_masks, img_pos_embed = self.x_mask_pos_enc(x_mm, img_metas)
-        txt_pos_embed = self.sinusoidal_positional_embedding(txt_feature.shape[1], self.embed_dim).to(txt_feature.device)  # [max_seq_len, embed_dim]
-        #reshape
-        bs, c, h, w = x_mm.shape
-        x_mm = x_mm.view(bs, c, -1).permute(0, 2, 1)  # [bs, h*w, c]
-        img_pos_embed = img_pos_embed.view(bs, c, -1).permute(0, 2, 1)  # [bs, h*w, c]
-        txt_pos_embed = txt_pos_embed.unsqueeze(0).repeat(bs, 1, 1)
-        img_masks = img_masks.view(bs, -1)  # [bs, h, w] -> [bs, h*w]
+        if self.projection:
+            x_mm = self.img_proj(x_mm)
+            txt_feature = self.txt_proj(txt_feature)
+        if self.pos_enc:
+            assert len(xmm.shape)!=4
+            #position embedding
+            img_masks, img_pos_embed = self.x_mask_pos_enc(x_mm, img_metas)
+            txt_pos_embed = self.sinusoidal_positional_embedding(txt_feature.shape[1], self.embed_dim).to(txt_feature.device)  # [max_seq_len, embed_dim]
+            #reshape
+            bs, c, h, w = x_mm.shape
+            x_mm = x_mm.view(bs, c, -1).permute(0, 2, 1)  # [bs, h*w, c]
+            img_pos_embed = img_pos_embed.view(bs, c, -1).permute(0, 2, 1)  # [bs, h*w, c]
+            txt_pos_embed = txt_pos_embed.unsqueeze(0).repeat(bs, 1, 1) #(bs, max_seq_len, c)
+            img_masks = img_masks.view(bs, -1)  # [bs, h, w] -> [bs, h*w]
+        else:
+            img_masks=None
+            img_pos_embed=None
 
         x = txt_feature
         if self.sentence_token_flag==True:
@@ -239,18 +248,21 @@ class ExisEcoder(nn.Module):
             #mask
             sen_token_padding_mask = torch.zeros((x.size(0), 1), dtype=x.dtype, device=x.device)
             text_mask = torch.cat([text_mask, sen_token_padding_mask], dim=1) #(bs, max_seq_len+1)
-            #pos embedding
-            sent_token_pos_embedding = self.sent_token_pos_embedding.unsqueeze(0).repeat(bs, 1, 1)
-            txt_pos_embed = torch.cat([txt_pos_embed, sent_token_pos_embedding], dim=1)
+            if self.pos_enc:
+                #pos embedding
+                sent_token_pos_embedding = self.sent_token_pos_embedding.unsqueeze(0).repeat(bs, 1, 1)
+                txt_pos_embed = torch.cat([txt_pos_embed, sent_token_pos_embedding], dim=1) #(bs, max_seq_len+1, c)
+
+                #text pos embedding 적용
+                x = x + txt_pos_embed
 
         
         for idx, layer in enumerate(self.layers):
             x = layer(
                 x_mm,
                 x,
-                img_pos_embed,
-                txt_pos_embed,
                 text_mask,
+                img_pos_embed,
                 img_masks
             )
 
