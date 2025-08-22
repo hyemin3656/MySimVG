@@ -416,36 +416,36 @@ class MIXDETRMB(OneStageModel):
             dummy_dict = {}
             dummy_dict['dummy_idx'] = [torch.tensor(False) for _ in range(len(results))]
             
-        for results_per_image, img_meta, is_dummy in zip(results, img_metas, dummy_dict['dummy_idx']):
+        for results_per_image, img_meta, is_dummy in zip(results, img_metas, dummy_dict['dummy_idx']): #dummy_idx : (num_valid, num_queries)
             image_size = img_meta["img_shape"]
             height = image_size[0]
             width = image_size[1]
 
-            if is_dummy.any():
-                # 원본 box tensor
-                boxes = results_per_image.pred_boxes.tensor  # shape: [num_query, 4]
-                # 대체할 더미 박스
-                dummy_box = torch.tensor([0.0, 0.0, 1e-6, 1e-6], device=boxes.device)
-                # is_dummy mask를 broadcast해서 [num_query, 4]로 확장
-                mask = is_dummy.unsqueeze(-1).expand_as(boxes)
-                # dummy_box를 is_dummy 위치에 대입
-                new_boxes = torch.where(mask, dummy_box, boxes)
-                # 결과 저장
-                results_per_image.pred_boxes = Boxes(new_boxes)
+            # if is_dummy.any():
+            #     # 원본 box tensor
+            #     boxes = results_per_image.pred_boxes.tensor  # shape: [num_query, 4]
+            #     # 대체할 더미 박스
+            #     dummy_box = torch.tensor([0.0, 0.0, 1e-6, 1e-6], device=boxes.device)
+            #     # is_dummy mask를 broadcast해서 [num_query, 4]로 확장
+            #     mask = is_dummy.unsqueeze(-1).expand_as(boxes)
+            #     # dummy_box를 is_dummy 위치에 대입
+            #     new_boxes = torch.where(mask, dummy_box, boxes)
+            #     # 결과 저장
+            #     results_per_image.pred_boxes = Boxes(new_boxes)
             #예측결과 후처리 - 이미지 크기에 맞는 최종 결과 생성 (ex. 좌표 변환, 스케일 복원)
             r = detector_postprocess(results_per_image, height, width)
             if is_dummy.any():
-                # 원본 box tensor
-                boxes = results_per_image.pred_boxes.tensor  # shape: [num_query, 4]
+                # 후처리 후 box tensor
+                boxes = r.pred_boxes.tensor  # shape: [num_query, 4]
                 # 대체할 더미 박스
                 dummy_box = torch.tensor([0.0, 0.0, 0.0, 0.0], device=boxes.device)
                 # dummy_box를 is_dummy 위치에 대입
-                original_boxes = torch.where(mask, dummy_box, boxes)
-                # 결과 저장
-                r.pred_boxes = Boxes(original_boxes)
+                mask = is_dummy.unsqueeze(-1).expand_as(boxes)
+                pred_box = torch.where(mask, dummy_box, boxes)
+            else:
+                pred_box = r.pred_boxes.tensor
 
             # infomation extract
-            pred_box = r.pred_boxes.tensor #(n_q, 4)
             score = r.scores #(n_q)
             pred_class = r.pred_classes #(n_q)
             if rescale:

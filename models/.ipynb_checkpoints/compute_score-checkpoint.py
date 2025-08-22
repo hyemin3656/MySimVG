@@ -12,13 +12,15 @@ class ExisEncoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim #768
         self.num_heads = 8
-        self.dropout_module = torch.nn.Dropout(0.7) #0.7
+        self.dropout_self_attn = nn.Dropout(0.7)
+        self.dropout_cross_attn = nn.Dropout(0.7)
         self.self_attn_flag = self_attn
         if self_attn == True:
             self.self_attn = self.build_self_attention(self.embed_dim, self.num_heads)
             self.self_attn_layer_norm = LayerNorm(self.embed_dim)
         self.cross_attn = self.build_cross_attention(self.embed_dim, self.num_heads)
         self.cross_attn_layer_norm = LayerNorm(self.embed_dim)
+        self.norm_before = False #######
 
         self.ffn_flag = ffn
         if ffn:
@@ -73,17 +75,18 @@ class ExisEncoderLayer(nn.Module):
             #attn_mask : (batch_size*num_heads, target seq len, source seq len)
             key_padding_mask = text_mask.bool()  #(bs, max_seq_len+1)
             #key_padding_mask = key_padding_mask.masked_fill(key_padding_mask.to(torch.bool), -1e8)
-            mask_q = text_mask.unsqueeze(1).unsqueeze(-1) # (batch_size, max_seq_len) -> (batch_size, 1, max_seq_len, 1)
             #--------------self-att, Add&Norm----------------#
             if self.self_attn_flag == True:
                 # mask_k = text_mask.unsqueeze(1).unsqueeze(2) # (batch_size, 1, 1, max_seq_len)
                 # self_attention_mask = mask_q | mask_k  # (batch_size, 1, max_seq_len, max_seq_len) # 둘 중 하나라도 padding이면 mask
                 # self_attention_mask = self_attention_mask.expand(-1, self.num_heads, -1, -1).flatten(0, 1).bool() # (batch_size*num_heads, seq_len, seq_len)
                 # self_attention_mask = self_attention_mask.masked_fill(self_attention_mask.to(torch.bool), -1e8)
-                
-                residual = txt_feature
-                x = self.self_attn_layer_norm(txt_feature) #(bs, max_seq_len+1, embed_dim)
-                x = x * (1 - text_mask.unsqueeze(-1).type_as(x)) #패딩된부분 무시 #(bs, max_seq_len+1, 1)
+                x = txt_feature
+                if self.norm_before:
+                    x = self.self_attn_layer_norm(x) #(bs, max_seq_len+1, embed_dim)
+
+                residual = x
+                #x = x * (1 - text_mask.unsqueeze(-1).type_as(x)) #패딩된부분 무시 #(bs, max_seq_len+1, 1)
                 x, attn_map = self.self_attn( 
                     query=x,
                     key=x,
@@ -91,14 +94,21 @@ class ExisEncoderLayer(nn.Module):
                     key_padding_mask=key_padding_mask,
                     attn_mask= None
                 )
-                x = self.dropout_module(x)
+                x = self.dropout_self_attn(x)
                 
                 x = self.residual_connection(x, residual)
+
+                if not self.norm_before:
+                    x = self.self_attn_layer_norm(x)
+
+                if self.norm_before:
+                    x = self.cross_attn_layer_norm(x)
                 residual = x
-                x = self.cross_attn_layer_norm(x)
             else:
-                residual = txt_feature
-                x = self.cross_attn_layer_norm(txt_feature)
+                x = txt_feature
+                if self.norm_before:
+                    x = self.cross_attn_layer_norm(x)
+                residual = x
                 
             #--------------cross-att, Add&Norm---------------#
             # cross_attention_mask = mask_q.repeat(1, self.num_heads, 1, img_feature.shape[-2])
@@ -107,25 +117,25 @@ class ExisEncoderLayer(nn.Module):
     
             # if self.normalize_before:
             #     x = self.self_attn_layer_norm(x)
-            x = x * (1 - text_mask.unsqueeze(-1).type_as(x)) #패딩된부분 무시
             x, attn_map = self.cross_attn( 
                 query=x,
                 key=img_feature,
                 value=img_feature,
                 attn_mask=None 
             )
-            x = self.dropout_module(x)
+            x = self.dropout_cross_attn(x)
 
             # if self.drop_path is not None:
             #     x = self.drop_path(x) #Residual Connection을 랜덤하게 비활성화
 
             x = self.residual_connection(x, residual)
-            # if not self.normalize_before: 
-            #     x = self.self_attn_layer_norm(x) #self-att 이후에 LayerNorm
+            if not self.norm_before: 
+                x = self.cross_attn_layer_norm(x) #self-att 이후에 LayerNorm
 
             if self.ffn_flag == True:
+                if self.norm_before: 
+                    x = self.ffn_layer_norm(x)
                 residual = x
-                x = self.ffn_layer_norm(x)
                 #--------------FFN---------------#
                 # if self.normalize_before:
                 #     x = self.final_layer_norm(x)
@@ -135,6 +145,8 @@ class ExisEncoderLayer(nn.Module):
                 #     x = self.drop_path(x)
 
                 x = self.residual_connection(x, residual)
+                if not self.norm_before:
+                    x = self.ffn_layer_norm(x)
                 # if not self.normalize_before:
                 #     x = self.final_layer_norm(x)
             return x

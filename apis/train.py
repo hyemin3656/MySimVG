@@ -49,6 +49,7 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
     end = time.time()
 
     loss_det_list, det_acc_list, n_acc_list, f1_score_list = (defaultdict(list), defaultdict(list), defaultdict(list), defaultdict(list))
+    avg_loss_dict_ = defaultdict(float)
     
     #epoch단위 N-acc, F1 관련 초기화---
     nt_all = {
@@ -80,7 +81,7 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
     selected_keys = ['loss_class', 'loss_bbox', 'loss_giou', 'loss_det']
     exis_keys = ['loss_score_mean', 'no_target_los_mean', 'others_los_mean']
     more_than_two_target = defaultdict(int)
-    num_not_valid_loss = torch.tensor(0.0, device=device)
+    num_not_all_dummy = torch.tensor(0.0, device=device)
     #torch.autograd.set_detect_anomaly(True)
     for batch, inputs in enumerate(loader):
         data_time = time.time() - end
@@ -117,18 +118,18 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
             inputs = extract_data(inputs)
         inputs["epoch"] = epoch
         inputs["batch"] = batch
-        inputs["batches"] = batches
+        inputs["batches"] = batches #532
 
         losses_dict, predictions, dummy_dict, dev = model(**inputs, rescale=False) #LGQS = False 일 경우 dummy_dict, dev는 None
 
-        #loss 누적
-        for key in selected_keys:
-            if key in losses_dict:
-                value = losses_dict[key]
-                total_loss[key] += value.item()
-            else:
-                if key == 'loss_det':
-                    num_not_valid_loss +=1
+        # #loss 누적
+        # for key in selected_keys:
+        #     if key in losses_dict:
+        #         value = losses_dict[key]
+        #         total_loss[key] += value.item()
+        # all_dummy_idx = dummy_dict['dummy_idx'].all(dim=1) #(bs) #num_queries개수만큼 더미가 모두 뽑혔을 때 dummy_idx는 True
+        # num_all_dummy = all_dummy_idx.sum()
+        # num_not_all_dummy += (batch_sample-num_all_dummy)
 
         batch_sample_size = [batch_sample, num_no_target, batch_sample-num_no_target]
         if "loss_exis_score" in losses_dict:
@@ -157,11 +158,13 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
             loss.backward()
             
         # for name, param in model.named_parameters():
-        #     if param.requires_grad:
-        #         if param.grad is not None:
-        #             print(f"{name}: grad exists ✅, grad norm = {param.grad.norm().item():.6f}")
-        #         else:
-        #             print(f"{name}: grad is None ❌")
+        #     if 'head' in name:
+        #         if param.requires_grad:
+        #             if param.grad is not None:
+        #                 print(f"{name}: grad exists ✅, grad norm = {param.grad.norm().item():.6f}")
+        #             else:
+        #                 print(f"{name}: grad is None ❌")
+                        
         if cfg.grad_norm_clip:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_norm_clip)
         optimizer.step()
@@ -249,6 +252,7 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                                 batches_for_check_under -= 1
                     
         # logging informations
+            
         if is_main() and ((batch + 1) % cfg.log_interval == 0 or batch + 1 == batches):
             loss_str_list = ["{}:{:.3f}".format(loss_n.split("loss_")[-1], sum(loss_v)/len(loss_v)) for loss_n, loss_v in loss_det_list.items()]
             loss_str =  "loss:["+" ".join(loss_str_list) +"]"
@@ -287,11 +291,18 @@ def train_model(epoch, cfg, model, model_ema, optimizer, loader, writer=None):
                 )
                 #Tensorboard
                 x_step = epoch*batches + batch + 1
-                #전체 train detection loss
-                if ((batch+1)-num_not_valid_loss) !=0:
-                    avg_loss_dict = {k: v / ((batch+1)-num_not_valid_loss) for k, v in total_loss.items()}
-                    #train loss
-                    writer.add_scalars(f"Loss/train", avg_loss_dict, x_step) 
+
+                for loss_n, loss_v in loss_det_list.items():
+                    loss_n = f"{loss_n.split('loss_')[-1]}"
+                    avg_loss = sum(loss_v)/len(loss_v)
+                    avg_loss_dict_[loss_n] = avg_loss
+                    writer.add_scalars(f"Loss/train", avg_loss_dict_, x_step)
+                    
+                # #전체 train detection loss
+                # if ((batch+1)-num_not_valid_loss) !=0:
+                #     avg_loss_dict = {k: v / ((batch+1)-num_not_valid_loss) for k, v in total_loss.items()}
+                #     #train loss
+                #     writer.add_scalars(f"Loss/train", avg_loss_dict, x_step) 
                 #train F1, N-acc
                 if batch + 1 == batches:
                     #전체 N-acc

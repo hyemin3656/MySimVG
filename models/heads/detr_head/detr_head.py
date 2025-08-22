@@ -68,6 +68,7 @@ class DETRHead(nn.Module):
         if self.language_guided_query_selection_flag:
             self.dummy_token = nn.Parameter(torch.randn(num_queries, in_channels)) 
             self.query_proj = nn.Linear(in_channels, embed_dim)
+            self.dummy_idx = None
 
         # define classification head and box head
         self.class_embed = nn.Linear(embed_dim, num_classes + 1) 
@@ -111,6 +112,7 @@ class DETRHead(nn.Module):
                 assert int(target_bbox.shape[0]) == len(img_meta["target"])
                 #Non-object -> 1/others -> 0
                 gt_classes = torch.tensor([1 if t["category_id"] == -1 else 0 for t in img_meta["target"]], device=target_bbox.device).long()
+                    
             gt_boxes = target_bbox.float() / image_size_xyxy #[0, 1] 정규화
             gt_boxes = box_xyxy_to_cxcywh(gt_boxes) #(center_x, center_y, width, height) 형태로 변환
             new_targets.append({"labels": gt_classes, "boxes": gt_boxes}) 
@@ -250,6 +252,7 @@ class DETRHead(nn.Module):
             B, C, H, W = pos_embed.shape
             n_patch = img_feat.size(1)
             dummy_idx = topk_patch_idx >= n_patch  #(bs, num_queries)
+            self.dummy_idx = dummy_idx
             all_dummy_idx = dummy_idx.all(dim=1) #(bs) #num_queries개수만큼 더미가 모두 뽑혔을 때 dummy_idx는 True
 
             #모든 쿼리에서 더미가 뽑힌 횟수
@@ -523,12 +526,24 @@ class DETRHead(nn.Module):
         #scores: (batch_size, num_queries)
         #labels: (batch_size, num_queries)
 
+        if self.language_guided_query_selection_flag:
+            dummy_idx = self.dummy_idx
+
         #각 샘플마다 저장
-        for i, (scores_per_image, labels_per_image, box_pred_per_image, image_size) in enumerate(
-            zip(scores, labels, box_pred, image_sizes)
+        for i, (scores_per_image, labels_per_image, box_pred_per_image, image_size, is_dummy) in enumerate(
+            zip(scores, labels, box_pred, image_sizes, dummy_idx)
         ):
             result = Instances(image_size)
-            result.pred_boxes = Boxes(box_cxcywh_to_xyxy(box_pred_per_image))  #(num_queries, 4)
+            if is_dummy.any():
+                # 대체할 더미 박스
+                dummy_box = torch.tensor([0.0, 0.0, 1e-6, 1e-6], device=box_pred_per_image.device)
+                # is_dummy mask를 broadcast해서 [num_query, 4]로 확장
+                mask = is_dummy.unsqueeze(-1).expand_as(box_pred_per_image)
+                new_boxes = torch.where(mask, dummy_box, box_pred_per_image)
+            else:
+                new_boxes = box_pred_per_image
+                
+            result.pred_boxes = Boxes(box_cxcywh_to_xyxy(new_boxes))  #(num_queries, 4)
             result.pred_boxes.scale(scale_x=image_size[1], scale_y=image_size[0])
             result.scores = scores_per_image #예측 스코어 #(num_q)
             result.pred_classes = labels_per_image #예측된 레이블 #(num_q)

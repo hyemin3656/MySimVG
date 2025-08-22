@@ -313,13 +313,16 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
     end = time.time()
 
     with_bbox, with_mask = False, False
-    det_acc_list, mask_iou_list, mask_acc_list, f1_score_list, n_acc_list = (
+    det_acc_list, mask_iou_list, mask_acc_list, f1_score_list, n_acc_list, loss_det_list = (
         defaultdict(list),
         defaultdict(list),
         defaultdict(list),
         defaultdict(list),
         defaultdict(list),
+        defaultdict(list)
     )
+    avg_loss_dict_ = defaultdict(float)
+    num_not_all_dummy = torch.tensor(0.0, device=device)
     with torch.no_grad():
         total_loss= defaultdict(float)
         total_sample = 0
@@ -395,10 +398,6 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                 #with_mask=with_mask,
             )
             
-            # 누적
-            for key in selected_keys:
-                value = losses_dict[key]
-                total_loss[key] += value.item()
                 
             batch_sample_size = [batch_sample, num_no_target, batch_sample-num_no_target]
             if "loss_exis_score" in losses_dict:
@@ -419,6 +418,12 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                 predictions_list = predictions
 
             # statistics informations
+            # statistics loss
+            for loss_name, loss_value in losses_dict.items():
+                if cfg.distributed:
+                    loss_value = reduce_mean(loss_value)
+                loss_det_list[loss_name].append(loss_value.item())
+            
             map_dict = {0: "decoder", 1: "token"}
             det_acc_dict, f1_score_acc_dict, n_acc_dict = {}, {}, {}
             for ind, predictions in enumerate(predictions_list):
@@ -514,8 +519,7 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
             
 
             end = time.time()
-        #전체 val detection loss
-        avg_loss_dict = {k: v / batch for k, v in total_loss.items()}
+            
         #전체 N-acc
         N_acc_all = nt_all["TP"] / (nt_all["TP"] + nt_all["FN"]) if nt_all["TP"] != 0 else torch.tensor(0.0, device=device)
         N_acc_all = N_acc_all.float() * 100
@@ -527,10 +531,15 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
         det_acc_all = det_acc_all.float()*100
         #Tensorboard
         if writer is not None:
-            #val loss
             if train_loader is not None:
                 x_step = (epoch+1) * len(train_loader)
-            writer.add_scalars(f"Loss/val", avg_loss_dict, x_step)
+                
+            #val loss
+            for loss_n, loss_v in loss_det_list.items():
+                loss_n = f"{loss_n.split('loss_')[-1]}"
+                avg_loss = sum(loss_v)/len(loss_v)
+                avg_loss_dict_[loss_n] = avg_loss
+            writer.add_scalars(f"Loss/val", avg_loss_dict_, x_step)
             #val F1, N-acc, det_acc
             writer.add_scalars(f"metric/f1", {"val_f1":F1_score_all.item()}, x_step)
             writer.add_scalars(f"metric/N-acc", {"val_N-acc":N_acc_all.item()}, x_step)
