@@ -224,9 +224,9 @@ def grec_evaluate_f1_nacc_detacc(predictions, gt_bboxes, targets, thresh_score=0
 
         sorted_scores_array = numpy.array(sorted_scores)
         idx = sorted_scores_array >= thresh_score
-        filtered_boxes = sorted_boxes[idx]
+        filtered_boxes = sorted_boxes[idx] # All Dummy) 빈 텐서
         # filtered_boxes = sorted_boxes[0:1]
-        giou = generalized_box_iou(filtered_boxes, gt_bbox_all.view(-1, 4)) #(num_prediction, num_gt)
+        giou = generalized_box_iou(filtered_boxes, gt_bbox_all.view(-1, 4)) #(num_prediction, num_gt) #All Dummy) 빈 텐서 반환
         num_prediction = filtered_boxes.shape[0] #score기준 필터링한 후 남은 예측 박스(쿼리) 수
         #confidence check
         # if no_target_flag == True:
@@ -326,7 +326,11 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
     with torch.no_grad():
         total_loss= defaultdict(float)
         total_sample = 0
-        exis_total_loss = defaultdict(float)
+        exis_total_loss = {  # defaultdict 대신 dict로
+            'loss_score_mean': 0.0,
+            'no_target_los_mean': 0.0,
+            'others_los_mean': 0.0,
+        }
         num_no_target_all = 0 #
         nt_all = {
             "TP": torch.tensor(0.0, device=device),
@@ -362,10 +366,6 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                     gt_bbox = copy.deepcopy(inputs["gt_bbox"])
                 else:
                     gt_bbox = copy.deepcopy(inputs["gt_bbox"].data[0])
-                for i in gt_bbox:
-                    if i.shape[0]>=3:
-                        shape_str = f'{i.shape[0]}'
-                        more_than_two_target[shape_str]+=1
                     
             if "gt_mask_rle" in inputs:
                 with_mask = True
@@ -412,18 +412,31 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
             dummy_token_diversity_loss = losses_dict.pop("dummy_token_diversity_loss", torch.tensor([0.0], device=device))
             nt_dummy_loss = losses_dict.pop("nt_dummy_loss", torch.tensor([0.0], device=device))
             others_dummy_loss = losses_dict.pop("others_dummy_loss", torch.tensor([0.0], device=device))
+
+            dummy_idx = dummy_dict['dummy_idx']
+            min_num_f1_0_sample = 0
+            for i, (bbox_one_sample, dummy_idx_one_sample) in enumerate(zip(gt_bbox, dummy_idx)):
+                if not no_target[i]:
+                    if bbox_one_sample.shape[0] >= 3:
+                        shape_str = f'{bbox_one_sample.shape[0]}'
+                        more_than_two_target[shape_str] += 1
+                    if bbox_one_sample.shape[0] > (~dummy_idx_one_sample).sum():
+                        min_num_f1_0_sample += 1
+            den = (batch_sample - num_no_target)
+            min_num_f1_0_sample_ratio = min_num_f1_0_sample / den if den > 0 else 0
+        
             if not isinstance(predictions, list):
                 predictions_list = [predictions]
             else:
                 predictions_list = predictions
-
-            # statistics informations
-            # statistics loss
+                
             for loss_name, loss_value in losses_dict.items():
-                if cfg.distributed:
-                    loss_value = reduce_mean(loss_value)
-                loss_det_list[loss_name].append(loss_value.item())
-            
+                if loss_name in selected_keys:
+                    if cfg.distributed:
+                        loss_value = reduce_mean(loss_value)
+                    loss_det_list[loss_name].append(loss_value.item())
+                
+            # statistics informations
             map_dict = {0: "decoder", 1: "token"}
             det_acc_dict, f1_score_acc_dict, n_acc_dict = {}, {}, {}
             for ind, predictions in enumerate(predictions_list):
@@ -550,6 +563,7 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                 sample_sizes = [total_sample, num_no_target_all, total_sample-num_no_target_all]
                 avg_exis_loss_dict = {k:v / sample_size for (k, v), sample_size in zip(exis_total_loss.items(), sample_sizes)}
                 writer.add_scalars(f"Exis_Loss/val", avg_exis_loss_dict, x_step)
+                print(sample_sizes)
             if dummy_dict is not None:
                 #해당 배치의 diversity loss
                 writer.add_scalar(f"dummy_diversity_loss/val", dummy_token_diversity_loss, x_step)
@@ -570,6 +584,9 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                 writer.add_scalars(f"dummy_ratio/val", {"dummy_num/total_size":dummy_dict_all['num_all_dummy'].item()/sample_sizes[0]}, x_step)
                 nt_denom = dummy_dict_all['sum_part_dummy_of_nt'].item()
                 others_denom = dummy_dict_all['sum_part_dummy_of_others'].item()
+
+                #min_num_f1_0_sample_ratio
+                writer.add_scalars(f"min_num_f1_0_sample_ratio/val", {"min_num_f1_0_sample_ratio":min_num_f1_0_sample_ratio.item()}, x_step)
 
                 if nt_denom > 1e-6 and others_denom > 1e-6:
                     #전체 dummy ratio

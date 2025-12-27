@@ -82,10 +82,10 @@ class LoadImageAnnotationsFromFile(object):
             filepath = osp.join(
                 results["imgsfile"], "%d.jpg" % results["ann"]["image_id"]
             )
-        elif "RefCOCO" in self.dataset:
+        elif "RefCOCO" in self.dataset: #GRefCOCO 포함
             filepath = osp.join(
                 results["imgsfile"],
-                "COCO_train2014_%012d.jpg" % results["ann"]["image_id"],
+                "COCO_train2014_%012d.jpg" % results["ann"]["image_id"], #'annotations'테이블의 상위 'image_id'
             )
         elif "Mixed" == self.dataset:
             data_source = results["ann"]["data_source"]

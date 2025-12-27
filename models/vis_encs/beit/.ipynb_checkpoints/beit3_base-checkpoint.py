@@ -489,7 +489,6 @@ class BEiT3(nn.Module):
                 )
             else:
                 encoder_padding_mask = None
-
         encoder_out = self.encoder(
             src_tokens=None,
             encoder_padding_mask=encoder_padding_mask, #(bs, 1+num_patches+max_seq_len+1)

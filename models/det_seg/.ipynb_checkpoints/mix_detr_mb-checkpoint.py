@@ -23,9 +23,9 @@ class MIXDETRMB(OneStageModel):
         super(MIXDETRMB, self).__init__(word_emb, num_token, vis_enc, lan_enc, head, fusion)
         self.patch_size = vis_enc["patch_size"]
         
-        self.beit_sentence_token_flag=False
-        self.exis_enc_sentence_token_flag=True #True
-        self.exis_encoder_flag=True #True
+        self.beit_sentence_token_flag=True
+        self.exis_enc_sentence_token_flag=False #True
+        self.exis_encoder_flag=False #True
         
         self.exis_proj = nn.Linear(768, 1) 
         self.now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -95,7 +95,8 @@ class MIXDETRMB(OneStageModel):
                 sent_feat = self.exisenc(img_feat, text_feat, text_mask=text_attention_mask, img_metas=img_metas) #(bs, embed_dim)
             
             #FC -> exis score
-            exis_scores = self.exis_proj(sent_feat) #(bs, 1)
+            exis_scores = self.exis_proj(cls_feat) #####
+            #exis_scores = self.exis_proj(sent_feat) #(bs, 1)
             exis_probs = torch.sigmoid(exis_scores) #(bs, 1)
 
             #loss
@@ -109,8 +110,8 @@ class MIXDETRMB(OneStageModel):
             per_sample_los_focal = sigmoid_focal_loss(
                 inputs=exis_scores.squeeze(-1), #positive class에 대한 logit
                 targets=gt_scores,
-                alpha=0.25,
-                gamma=2.0,
+                alpha=0.1, #0.25
+                gamma=3.0, #2.0
                 reduction='none'
             )
             
