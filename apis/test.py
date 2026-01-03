@@ -10,6 +10,8 @@ from simvg.utils import get_root_logger, reduce_mean, is_main
 from torchvision.ops.boxes import box_area
 from mmdet.core.bbox.iou_calculators.iou2d_calculator import bbox_overlaps
 from collections import defaultdict
+import torch.nn.functional as F
+
 
 
 def mask_overlaps(gt_mask, pred_masks, is_crowd):
@@ -324,6 +326,7 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
     avg_loss_dict_ = defaultdict(float)
     num_not_all_dummy = torch.tensor(0.0, device=device)
     with torch.no_grad():
+        topk_cos_sim_loss_flag = False
         total_loss= defaultdict(float)
         total_sample = 0
         exis_total_loss = {  # defaultdict 대신 dict로
@@ -331,7 +334,13 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
             'no_target_los_mean': 0.0,
             'others_los_mean': 0.0,
         }
+        more_than_ten_target = 0
         num_no_target_all = 0 #
+        num_ot_all = 0
+        num_mt_all = 0
+        nt_topk_sum_all = 0
+        ot_topk_sum_all = 0
+        mt_topk_sum_all = 0
         nt_all = {
             "TP": torch.tensor(0.0, device=device),
             "TN": torch.tensor(0.0, device=device),
@@ -354,7 +363,6 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
         }
         selected_keys = ['loss_class', 'loss_bbox', 'loss_giou', 'loss_det']
         exis_keys = ['loss_score_mean', 'no_target_los_mean', 'others_los_mean']
-        more_than_two_target = defaultdict(int)
         for batch, inputs in enumerate(loader):
             gt_bbox, gt_mask, is_crowd = None, None, None
             batch_sample = len(inputs["gt_bbox"].data[0])
@@ -375,21 +383,36 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
 
             img_metas = inputs["img_metas"].data[0]
             #-----------
-            no_target = torch.tensor([0]*batch_sample, device=device)
+            no_target = torch.zeros(batch_sample, dtype=torch.bool, device=device)
             for i, meta in enumerate(img_metas):
                 for target in meta['target']:
                     if target['category_id']==-1:
-                        no_target[i]=1
+                        no_target[i]=True
             num_no_target = no_target.sum()
             num_no_target_all += num_no_target
             #-----------
-
+            ot_bool = torch.zeros(batch_sample, dtype=torch.bool, device=device)
+            mt_bool = torch.zeros(batch_sample, dtype=torch.bool, device=device)
+            num_ot = 0
+            for i, (bbox_one_sample) in enumerate(gt_bbox):
+                if not no_target[i]:
+                    if bbox_one_sample.shape[0] >10:
+                        more_than_ten_target += 1
+                    if bbox_one_sample.shape[0] == 1:
+                        ot_bool[i]=True
+                        num_ot += 1
+                    if bbox_one_sample.shape[0] >= 2:
+                        mt_bool[i]=True
+            num_mt = (batch_sample - num_no_target) - num_ot
+            num_ot_all += num_ot
+            num_mt_all += num_mt
+                        
             if not cfg.distributed:
                 inputs = extract_data(inputs)
             inputs["epoch"]=epoch
             inputs["batch"] = batch
             inputs["batches"] = batches
-            losses_dict, predictions, dummy_dict, dev = model( #basline은 dummy_dict, dev가 None
+            losses_dict, predictions, topk_per_batch_mean, dummy_dict, dev = model( #basline은 dummy_dict, dev가 None
                 **inputs,
                 train_flag=False,
                 return_loss=True,
@@ -398,7 +421,7 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                 #with_mask=with_mask,
             )
             
-                
+                    
             batch_sample_size = [batch_sample, num_no_target, batch_sample-num_no_target]
             if "loss_exis_score" in losses_dict:
                 exis_enc_flag = True
@@ -413,18 +436,36 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
             nt_dummy_loss = losses_dict.pop("nt_dummy_loss", torch.tensor([0.0], device=device))
             others_dummy_loss = losses_dict.pop("others_dummy_loss", torch.tensor([0.0], device=device))
 
-            dummy_idx = dummy_dict['dummy_idx']
-            min_num_f1_0_sample = 0
-            for i, (bbox_one_sample, dummy_idx_one_sample) in enumerate(zip(gt_bbox, dummy_idx)):
-                if not no_target[i]:
-                    if bbox_one_sample.shape[0] >= 3:
-                        shape_str = f'{bbox_one_sample.shape[0]}'
-                        more_than_two_target[shape_str] += 1
-                    if bbox_one_sample.shape[0] > (~dummy_idx_one_sample).sum():
-                        min_num_f1_0_sample += 1
-            den = (batch_sample - num_no_target)
-            min_num_f1_0_sample_ratio = min_num_f1_0_sample / den if den > 0 else 0
-        
+            if dummy_dict:
+                dummy_idx = dummy_dict['dummy_idx']
+                min_num_f1_0_mt_sample = 0
+                min_num_f1_0_ot_sample = 0
+                for i, (bbox_one_sample, dummy_idx_one_sample) in enumerate(zip(gt_bbox, dummy_idx)):
+                    if not no_target[i]:
+                        if bbox_one_sample.shape[0] > (~dummy_idx_one_sample).sum():
+                            if bbox_one_sample.shape[0]==1:
+                                min_num_f1_0_ot_sample += 1
+                            if bbox_one_sample.shape[0]>1:
+                                min_num_f1_0_mt_sample += 1
+                min_num_f1_0_mt_sample_ratio = min_num_f1_0_mt_sample / num_mt if num_mt > 0 else float('nan')
+                print(min_num_f1_0_mt_sample_ratio)
+                min_num_f1_0_ot_sample_ratio = min_num_f1_0_ot_sample/num_ot if num_ot>0 else float('nan')
+                print(min_num_f1_0_ot_sample_ratio)
+                
+            if exis_enc_flag:
+                nt_topk_sum = topk_per_batch_mean[no_target].sum()
+                nt_topk_sum_all += nt_topk_sum
+                ot_topk_sum = topk_per_batch_mean[ot_bool].sum()
+                ot_topk_sum_all += ot_topk_sum
+                mt_topk_sum = topk_per_batch_mean[mt_bool].sum()
+                mt_topk_sum_all += mt_topk_sum
+
+                gt_topk_mean = ~no_target
+                gt_topk_mean = gt_topk_mean.float()
+                if topk_cos_sim_loss_flag:
+                    topk_cos_sim_loss = F.mse_loss(topk_per_batch_mean, gt_topk_mean, reduction="mean")
+                else: topk_cos_sim_loss = 0
+                    
             if not isinstance(predictions, list):
                 predictions_list = [predictions]
             else:
@@ -542,6 +583,7 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
         #전체 det acc
         det_acc_all = num_correct_ot_all/num_ot_all
         det_acc_all = det_acc_all.float()*100
+        print("more_than_ten_target", more_than_ten_target)
         #Tensorboard
         if writer is not None:
             if train_loader is not None:
@@ -564,6 +606,12 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                 avg_exis_loss_dict = {k:v / sample_size for (k, v), sample_size in zip(exis_total_loss.items(), sample_sizes)}
                 writer.add_scalars(f"Exis_Loss/val", avg_exis_loss_dict, x_step)
                 print(sample_sizes)
+
+                Exis_distinguish = {"nt": nt_topk_sum_all/num_no_target_all, "ot": ot_topk_sum_all/num_ot_all, "mt": mt_topk_sum_all/num_mt_all}
+                writer.add_scalars(f"Exis_distinguish/val", Exis_distinguish, x_step)
+                if topk_cos_sim_loss_flag:
+                    writer.add_scalars(f"topk_cos_sim_loss_flag", {"val":topk_cos_sim_loss.item()}, x_step)
+
             if dummy_dict is not None:
                 #해당 배치의 diversity loss
                 writer.add_scalar(f"dummy_diversity_loss/val", dummy_token_diversity_loss, x_step)
@@ -586,7 +634,7 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                 others_denom = dummy_dict_all['sum_part_dummy_of_others'].item()
 
                 #min_num_f1_0_sample_ratio
-                writer.add_scalars(f"min_num_f1_0_sample_ratio/val", {"min_num_f1_0_sample_ratio":min_num_f1_0_sample_ratio.item()}, x_step)
+                writer.add_scalars(f"min_num_f1_0_sample_ratio/val", {"min_num_f1_0_mt_sample_ratio":min_num_f1_0_mt_sample_ratio, "min_num_f1_0_ot_sample_ratio": min_num_f1_0_ot_sample_ratio}, x_step)
 
                 if nt_denom > 1e-6 and others_denom > 1e-6:
                     #전체 dummy ratio
@@ -599,12 +647,12 @@ def evaluate_model(epoch, cfg, model, loader, train_loader=None, writer=None):
                 #dev
                 if dev is not None:
                     writer.add_scalars(f"dev/val/no_target", {
-                        'dotpro':  dev['no_target']['dotpro']/num_no_target_all,
-                        'scaled':  dev['no_target']['scaled']/num_no_target_all
+                        'dotpro':  dev['no_target']['sim']/num_no_target_all,
+                        'scaled':  dev['no_target']['scaled_sim']/num_no_target_all
                     }, x_step)
                     writer.add_scalars(f"dev/val/others", {
-                        'dotpro':  dev['others']['dotpro']/ (total_sample - num_no_target_all),
-                        'scaled':  dev['others']['scaled']/ (total_sample - num_no_target_all)
+                        'dotpro':  dev['others']['sim']/ (total_sample - num_no_target_all),
+                        'scaled':  dev['others']['scaled_sim']/ (total_sample - num_no_target_all)
                     }, x_step)
                 #ratio_under/over_cross_blah
                 writer.add_scalars(f"ratio_cross_blah/val", {

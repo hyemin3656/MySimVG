@@ -31,6 +31,10 @@ class DETRHead(nn.Module):
         language_guided_query_selection_flag = True
     ):
         super(DETRHead, self).__init__()
+        self.language_guided_query_selection_baseline_flag = True #####
+        if self.language_guided_query_selection_baseline_flag:
+            self.query_proj = nn.Linear(in_channels, embed_dim)
+            
         self.num_queries = num_queries
         self.transformer = DetrTransformer(
             encoder=DetrTransformerEncoder(
@@ -64,6 +68,7 @@ class DETRHead(nn.Module):
             temperature=10000,
             normalize=True,
         )
+
         self.language_guided_query_selection_flag = language_guided_query_selection_flag
         if self.language_guided_query_selection_flag:
             self.dummy_token = nn.Parameter(torch.randn(num_queries, in_channels)) 
@@ -144,7 +149,37 @@ class DETRHead(nn.Module):
         #     batch_size, self.d_model, -1).transpose(1, 2)
 
         return x_mask, x_pos_embeds
+    def language_guided_query_selection_baseline(self, text_feat, img_feat, text_scores, text_mask, epoch=None):
+        #text_scores : (bs, 1)
+        nan_mask = text_mask.bool().unsqueeze(1) #(bs, 1, max_seq_len)
 
+        # --- reshape for broadcasting ---
+        img_feat_exp = img_feat.unsqueeze(2)  # (bs, N_p, 1, dim)
+        text_feat_exp = text_feat.unsqueeze(1)           # (bs, 1, max_seq_len, dim)
+
+        # --- cosine similarity 계산 ---
+        similarity_cos = F.cosine_similarity(img_feat_exp, text_feat_exp, dim=-1)  # (bs, N_p + num_query, max_seq_len)
+
+        #패딩부분 무시
+        masked_similarity_cos = similarity_cos.masked_fill(nan_mask, float('-inf'))
+        #print(scaled_similarity[0])
+
+        #max 추출- max first
+        max_per_patch, max_text_idx = masked_similarity_cos.max(dim=-1) # (batch_size, N_p)
+
+        topk_per_batch, topk_patch_idx = torch.topk(max_per_patch, self.num_queries, -1) #(bs, num_queries)
+
+        bs, num_queries = topk_patch_idx.shape
+        
+        max_patch_onehot = torch.zeros(bs, num_queries, max_per_patch.size(-1), device=max_per_patch.device) #(bs, num_queries, N_p )
+        idx = topk_patch_idx.unsqueeze(-1)     # (bs, num_queries, 1)
+        max_patch_onehot.scatter_(2, idx, 1.0) #(bs, num_queries, N_p)
+        
+        selected_patch_feat = torch.bmm(max_patch_onehot, img_feat) #(bs, num_queries, embed_dim)
+
+        selected_patch_query = self.query_proj(selected_patch_feat) #그래디언트 Nan 아님   
+        return selected_patch_query, topk_patch_idx, masked_similarity_cos
+        
     def language_guided_query_selection(self, text_feat, img_feat, text_scores, text_mask, epoch=None):
         #text_scores : (bs, 1)
         nan_mask = text_mask.bool().unsqueeze(1) #(bs, 1, max_seq_len)
@@ -237,7 +272,7 @@ class DETRHead(nn.Module):
         img_feat, #encoder output의 img_feat
         img_metas,
         text_feat=None,
-        text_scores=None, #exis_prob
+        text_scores=None,
         text_mask=None,
         gt_bbox=None,
         gt_mask_vertices=None,
@@ -250,6 +285,9 @@ class DETRHead(nn.Module):
         # feature proj to embed channels
         x_mm = self.input_proj(x_mm) #nn.Conv2d(in_channels, embed_dim, kernel_size=1) -> embed_dim을 변경
         img_masks, pos_embed = self.x_mask_pos_enc(x_mm, img_metas)  # TODO: fix the img mask #padding 전처리 들어갈 경우 필요
+
+        if self.language_guided_query_selection_baseline_flag:
+            query_embed, topk_patch_idx, similarity = self.language_guided_query_selection_baseline(text_feat, img_feat, text_scores, text_mask, epoch=epoch)    
         
         if self.language_guided_query_selection_flag:
             #similarit - not masked / scaled_similarity - masked
@@ -366,7 +404,10 @@ class DETRHead(nn.Module):
             not_all_dummy_mask = torch.ones(x_mm.size(0), dtype=torch.bool, device=x_mm.device)
             valid_x_mm = x_mm
             valid_img_masks = img_masks
-            valid_query_embed = self.query_embed.weight
+            if self.language_guided_query_selection_baseline_flag:
+                valid_query_embed = query_embed
+            else:
+                valid_query_embed = self.query_embed.weight
             valid_pos_embed = pos_embed
             valid_dummy_mask = torch.zeros((x_mm.size(0), self.num_queries), dtype=torch.bool, device=x_mm.device)
  
@@ -438,7 +479,7 @@ class DETRHead(nn.Module):
             if self.aux_loss:
                 valid_output["aux_outputs"] = self._set_aux_loss(valid_outputs_class, valid_outputs_coord)
 
-            targets = self.prepare_targets(gt_bbox, img_metas) #gt logit, gt 좌표 준비 {"labels": [1], "boxes": [1, n, 4]}의 리스트
+            targets = self.prepare_targets(gt_bbox, img_metas) #gt logit, gt 좌표 준비 {"labels": [n], "boxes": [1, n, 4]}의 리스트
             valid_targets = [x for x, m in zip(targets, not_all_dummy_mask) if m]
             loss_dict = self.criterion(valid_output, valid_targets, valid_dummy_mask) #{"loss_class": loss_class, "loss_giou" : loss_giou, "loss_bbox": loss_bbox, "loss_class_0":, ..(보조 손실까지 포함)}
             weight_dict = self.criterion.weight_dict
@@ -456,7 +497,11 @@ class DETRHead(nn.Module):
 
         else:
             output = valid_output
-            dummy_dict, similarity, scaled_similarity, scale_factor = None, None, None, None
+            dummy_dict, scaled_similarity, scale_factor = None, None, None
+            if self.language_guided_query_selection_baseline_flag:
+                similarity = similarity
+            else:
+                similarity = None
         return loss_dict, output, dummy_dict, similarity, scaled_similarity, scale_factor
 
         # proj_queries = F.normalize(self.contrastive_align_projection_image(logits), p=2, dim=-1)
